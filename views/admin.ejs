@@ -39,26 +39,36 @@
     </table>
 
     <h2>👥 Gestion Users</h2>
-    <table>
-        <tr><th>Email</th><th>Solde</th><th>Actions</th></tr>
+<table>
+    <thead>
+        <tr>
+            <th>Email</th>
+            <th>Solde</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
         <% users.forEach(u => { %>
             <tr>
                 <td><%= u.email %></td>
-                <td><%= u.balance %>$</td>
+                <td style="color: #2ecc71; font-weight: bold;"><%= u.balance %>$</td>
                 <td>
-                    <form action="/admin/add-balance" method="POST" style="display:inline;">
-                        <input type="hidden" name="psid" value="<%= u.psid %>">
-                        <input type="number" name="amount" placeholder="+" style="width:50px;">
-                        <button class="btn" style="background:#2980b9;">Créditer</button>
-                    </form>
-                    <form action="/admin/sub-balance" method="POST" style="display:inline;">
-                        <input type="hidden" name="psid" value="<%= u.psid %>">
-                        <input type="number" name="amount" placeholder="-" style="width:50px;">
-                        <button class="btn" style="background:#e67e22;">Débiter</button>
-                    </form>
+                    <div style="display: flex; gap: 10px;">
+                        <form action="/admin/add-balance" method="POST" style="display: flex; align-items: center;">
+                            <input type="hidden" name="psid" value="<%= u.psid %>">
+                            <input type="number" name="amount" placeholder="+" step="0.01" style="width: 50px; margin-right: 5px;" required>
+                            <button type="submit" class="btn" style="background: #2980b9;">Créditer</button>
+                        </form>
+
+                        <form action="/admin/sub-balance" method="POST" style="display: flex; align-items: center;">
+                            <input type="hidden" name="psid" value="<%= u.psid %>">
+                            <input type="number" name="amount" placeholder="-" step="0.01" style="width: 50px; margin-right: 5px;" required>
+                            <button type="submit" class="btn" style="background: #e67e22;">Débiter</button>
+                        </form>
+                    </div>
                 </td>
             </tr>
-        <% u }) %>
-    </table>
+        <% }); %> </tbody>
+</table>
 </body>
 </html>

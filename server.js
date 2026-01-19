@@ -1,78 +1,119 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const path = require('path');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.set('view engine', 'ejs');
 
 // --- CONFIGURATION ---
+// Assure-toi que ces variables sont bien dans les "Environment Variables" sur Render
 const MONGO_URI = process.env.MONGO_URI;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
-mongoose.connect(MONGO_URI).then(() => console.log("✅ DB Admin Connectée"));
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// --- MODÈLES ---
-const Order = mongoose.model('Order', new mongoose.Schema({
-    psid: String, orderId: String, method: String, provider: String,
-    price: Number, status: { type: String, default: 'EN ATTENTE' },
-    paymentRef: String, proxyData: String, expiresAt: Date, date: { type: Date, default: Date.now }
+// --- CONNEXION BDD ---
+mongoose.connect(MONGO_URI)
+    .then(() => console.log("✅ Admin Dashboard connecté à MongoDB"))
+    .catch(err => console.error("❌ Erreur de connexion MongoDB:", err));
+
+// --- MODÈLES (Doivent être identiques à ceux du Bot) ---
+const User = mongoose.model('User', new mongoose.Schema({
+    psid: String, email: String, balance: { type: Number, default: 0 }
 }));
 
-const User = mongoose.model('User', new mongoose.Schema({
-    psid: { type: String, unique: true }, email: String, balance: { type: Number, default: 0 }
+const Order = mongoose.model('Order', new mongoose.Schema({
+    psid: String, orderId: String, provider: String, price: Number,
+    status: { type: String, default: 'EN ATTENTE' }, proxyData: String, date: { type: Date, default: Date.now }
+}));
+
+const Settings = mongoose.model('Settings', new mongoose.Schema({
+    key: String, value: String
 }));
 
 // --- ROUTES ---
-app.get('/', (req, res) => res.redirect('/admin/panel'));
 
+// 1. PAGE PRINCIPALE (Affiche les stats, les commandes et les utilisateurs)
 app.get('/admin/panel', async (req, res) => {
     try {
-        const lang = req.query.lang === 'en' ? 'en' : 'fr';
         const users = await User.find({ email: { $exists: true } }).sort({ balance: -1 });
-        const pendingOrders = await Order.find({ status: 'EN ATTENTE' }).sort({ date: -1 });
-        const delivered = await Order.find({ status: 'LIVRÉ' });
-        
-        // Calcul des gains réels
+        // On récupère toutes les commandes qui ne sont pas encore livrées
+        const pending = await Order.find({ status: { $regex: /EN ATTENTE/i } }).sort({ date: -1 });
+        const delivered = await Order.find({ status: /LIVRÉ/i });
+
+        // Calcul du gain total (Somme des prix des commandes livrées)
         const totalEarnings = delivered.reduce((acc, o) => acc + (o.price || 0), 0);
 
-        const t = {
-            fr: { title: "ProxyFlow Control", st_u: "Users", st_s: "Ventes", st_g: "Gains", t_pend: "En attente", t_user: "Utilisateurs", c_pay: "Ref", b_del: "Livrer ✅", b_ref: "Refuser ✖" },
-            en: { title: "ProxyFlow Control", st_u: "Users", st_s: "Sold", st_g: "Earnings", t_pend: "Pending", t_user: "User List", c_pay: "Ref", b_del: "Deliver ✅", b_ref: "Decline ✖" }
-        }[lang];
-
-        res.render('admin', { pendingOrders, users, stats: { u: users.length, s: delivered.length, g: totalEarnings.toFixed(2) }, t, currentLang: lang });
-    } catch (e) { res.status(500).send(e.message); }
+        // --- C'EST ICI QUE L'ERREUR "PENDING IS NOT DEFINED" EST CORRIGÉE ---
+        res.render('admin', { 
+            pending: pending || [], 
+            users: users || [], 
+            stats: { 
+                u: users.length, 
+                s: delivered.length, 
+                g: totalEarnings.toFixed(2) 
+            } 
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Erreur lors de la récupération des données : " + err.message);
+    }
 });
 
-// ACTIONS
-app.post('/admin/add-balance', async (req, res) => {
-    await User.findOneAndUpdate({ psid: req.body.psid }, { $inc: { balance: parseFloat(req.body.amount) } });
-    res.redirect('back');
-});
-
+// 2. LIVRAISON DE LA COMMANDE
 app.post('/admin/deliver', async (req, res) => {
     const { orderId, proxyData } = req.body;
-    const expiry = new Date(); expiry.setDate(expiry.getDate() + 30);
-    const order = await Order.findOneAndUpdate({ orderId }, { status: 'LIVRÉ', proxyData, expiresAt: expiry }, { new: true });
-    if (order) {
-        await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-            recipient: { id: order.psid }, message: { text: `✅ Order Delivered!\nISP: ${order.provider}\nProxy: ${proxyData}\nExpires: ${expiry.toLocaleDateString()}` }
-        }).catch(() => {});
+    try {
+        const order = await Order.findOneAndUpdate(
+            { orderId }, 
+            { status: 'LIVRÉ', proxyData }, 
+            { new: true }
+        );
+
+        if (order) {
+            // Envoi automatique du message de livraison au client sur Messenger
+            await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
+                recipient: { id: order.psid },
+                message: { 
+                    text: `✅ LIVRAISON RÉUSSIE !\n\nCommande: ${order.provider}\nVos Proxies (0 Fraud Score):\n${proxyData}\n\nMerci de votre confiance !` 
+                }
+            });
+        }
+        res.redirect('/admin/panel');
+    } catch (err) {
+        res.status(500).send("Erreur lors de la livraison.");
     }
-    res.redirect('back');
 });
 
-app.post('/admin/cancel', async (req, res) => {
-    const { orderId, reason } = req.body;
-    const order = await Order.findOneAndUpdate({ orderId }, { status: 'REFUSÉ' }, { new: true });
-    if (order) {
-        await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-            recipient: { id: order.psid }, message: { text: `❌ Order Declined!\nID: ${order.orderId}\nReason: ${reason || "Invalid Payment."}` }
-        }).catch(() => {});
+// 3. AJOUTER DU SOLDE À UN CLIENT MANUELLEMENT
+app.post('/admin/add-balance', async (req, res) => {
+    const { psid, amount } = req.body;
+    try {
+        await User.findOneAndUpdate({ psid }, { $inc: { balance: parseFloat(amount) } });
+        res.redirect('/admin/panel');
+    } catch (err) {
+        res.status(500).send("Erreur lors de l'ajout de solde.");
     }
-    res.redirect('back');
 });
 
-app.listen(process.env.PORT || 3000);
+// 4. METTRE À JOUR LES FREE PROXIES (Sans redémarrer le bot)
+app.post('/admin/update-free', async (req, res) => {
+    const { freeContent } = req.body;
+    try {
+        await Settings.findOneAndUpdate(
+            { key: 'free_proxies' }, 
+            { value: freeContent }, 
+            { upsert: true }
+        );
+        res.redirect('/admin/panel');
+    } catch (err) {
+        res.status(500).send("Erreur lors de la mise à jour des free proxies.");
+    }
+});
+
+// Lancement du serveur
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Admin Dashboard sur le port ${PORT}`));

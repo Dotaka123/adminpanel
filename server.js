@@ -39,27 +39,36 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
 // 1. PAGE PRINCIPALE (Affiche les stats, les commandes et les utilisateurs)
 app.get('/admin/panel', async (req, res) => {
     try {
+        // 1. Fetch data
         const users = await User.find({ email: { $exists: true } }).sort({ balance: -1 });
-        // On récupère toutes les commandes qui ne sont pas encore livrées
-        const pending = await Order.find({ status: { $regex: /EN ATTENTE/i } }).sort({ date: -1 });
-        const delivered = await Order.find({ status: /LIVRÉ/i });
+        const rawOrders = await Order.find({ status: { $regex: /PENDING|EN ATTENTE/i } }).sort({ date: -1 });
+        const deliveredOrders = await Order.find({ status: /LIVRÉ|DELIVERED/i });
 
-        // Calcul du gain total (Somme des prix des commandes livrées)
-        const totalEarnings = delivered.reduce((acc, o) => acc + (o.price || 0), 0);
+        // 2. Map PSID to Email for easy reading
+        const pending = await Promise.all(rawOrders.map(async (order) => {
+            const user = await User.findOne({ psid: order.psid });
+            return {
+                ...order._doc,
+                customerEmail: user ? user.email : "Guest/Unknown"
+            };
+        }));
 
-        // --- C'EST ICI QUE L'ERREUR "PENDING IS NOT DEFINED" EST CORRIGÉE ---
+        // 3. Stats calculation
+        const earnings = deliveredOrders.reduce((acc, o) => acc + (o.price || 0), 0);
+
+        // 4. Send to EJS
         res.render('admin', { 
-            pending: pending || [], 
-            users: users || [], 
+            pending, 
+            users, 
             stats: { 
                 u: users.length, 
-                s: delivered.length, 
-                g: totalEarnings.toFixed(2) 
+                s: deliveredOrders.length, 
+                g: earnings.toFixed(2) 
             } 
         });
     } catch (err) {
         console.error(err);
-        res.status(500).send("Erreur lors de la récupération des données : " + err.message);
+        res.status(500).send("Server Error: " + err.message);
     }
 });
 

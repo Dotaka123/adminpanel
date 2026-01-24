@@ -10,7 +10,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS Configuration - Accepte le frontend
+// CORS Configuration
 const corsOptions = {
   origin: [
     process.env.FRONTEND_URL,
@@ -131,7 +131,7 @@ const PRICES = {
   }
 };
 
-// Fonction pour obtenir le token API (TES identifiants secrets)
+// Fonction pour obtenir le token API
 async function getAuthToken() {
   const now = Date.now() / 1000;
   
@@ -391,7 +391,7 @@ app.get('/api/admin/stats', authMiddleware, adminMiddleware, async (req, res) =>
   }
 });
 
-// ========== ROUTES PROXIES (PROTÉGÉES) ==========
+// ========== ROUTES PROXIES ==========
 
 app.get('/api/prices', (req, res) => {
   res.json(PRICES);
@@ -576,6 +576,76 @@ app.get('/api/stats', async (req, res) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// Page d'accueil
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Proxy Shop API</title>
+        <style>
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+          }
+          .container {
+            text-align: center;
+            background: rgba(255,255,255,0.1);
+            padding: 50px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+          }
+          h1 { font-size: 48px; margin-bottom: 10px; }
+          p { font-size: 18px; opacity: 0.9; margin-bottom: 30px; }
+          .links { display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }
+          a {
+            display: inline-block;
+            background: white;
+            color: #667eea;
+            padding: 15px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: bold;
+            transition: all 0.3s;
+          }
+          a:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(255,255,255,0.3);
+          }
+          .status {
+            background: rgba(76, 175, 80, 0.3);
+            padding: 10px 20px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-top: 20px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🌐 Proxy Shop API</h1>
+          <p>Backend opérationnel et prêt</p>
+          <div class="links">
+            <a href="/admin.html">👑 Panel Admin</a>
+            <a href="/health">🏥 Health Check</a>
+          </div>
+          <div class="status">✅ Système actif</div>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 // Créer le premier admin

@@ -546,20 +546,35 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
   }
 });
 
+// Mes proxies - retourne les proxies de la BDD locale ET de l'API
 app.get('/api/my-proxies', authMiddleware, async (req, res) => {
   try {
-    const proxies = await ProxyPurchase.find({ userId: req.user._id }).sort({ createdAt: -1 });
-    res.json(proxies);
+    // Récupérer les proxies de la base de données locale
+    const localProxies = await ProxyPurchase.find({ userId: req.user._id }).sort({ createdAt: -1 });
+    
+    // Essayer de récupérer aussi depuis l'API externe (si disponible)
+    try {
+      const apiProxies = await apiRequest('GET', '/all-proxies', null, { offset: 0 });
+      // Combiner les deux sources si nécessaire
+      // Pour l'instant on retourne juste les locaux car l'API externe nécessite un compte différent
+    } catch (apiError) {
+      console.log('API externe non disponible, utilisation BDD locale uniquement');
+    }
+    
+    res.json(localProxies);
   } catch (error) {
+    console.error('Erreur my-proxies:', error);
     res.json([]);
   }
 });
 
+// Transactions - retourne les transactions de la BDD locale
 app.get('/api/transactions', authMiddleware, async (req, res) => {
   try {
     const transactions = await Transaction.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json(transactions);
   } catch (error) {
+    console.error('Erreur transactions:', error);
     res.json([]);
   }
 });

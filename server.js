@@ -25,7 +25,16 @@ const corsOptions = {
 app.set('trust proxy', 1);
 app.use(cors(corsOptions));
 app.use(express.json());
-app.use(express.static('public'));
+
+// --- MODIFICATION ICI ---
+// 1. Servir le dossier public avec un chemin absolu (plus fiable)
+app.use(express.static(path.join(__dirname, 'public')));
+
+// 2. Route racine : Si on va sur "/", on envoie admin.html
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+// ------------------------
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
@@ -205,6 +214,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
+      email,
       email,
       password: hashedPassword,
       balance: 0
@@ -603,7 +613,7 @@ app.listen(PORT, async () => {
   console.log('║    PROXY SHOP API - SERVEUR ACTIF      ║');
   console.log('╚════════════════════════════════════════╝');
   console.log(`\n🌐 Backend URL: http://localhost:${PORT}`);
-  console.log(`📋 Panel Admin: http://localhost:${PORT}/admin.html`);
+  console.log(`📋 Panel Admin: http://localhost:${PORT}/admin.html`); // Le lien / fonctionnera maintenant
   console.log(`🔗 Frontend autorisé: ${process.env.FRONTEND_URL || 'localhost'}`);
   
   try {

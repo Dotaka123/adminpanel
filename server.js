@@ -815,6 +815,90 @@ app.post('/api/admin/recharges/:id/reject', authMiddleware, adminMiddleware, asy
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
+// RECHARGE MODEL
+const RechargeSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  amount: { type: Number, required: true },
+  faucetpayUsername: { type: String, required: true },
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now }
+});
+const Recharge = mongoose.model('Recharge', RechargeSchema);
+
+// GET RECHARGES
+app.get('/api/admin/recharges', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const recharges = await Recharge.find().populate('userId', 'email').sort({ createdAt: -1 });
+    res.json(recharges);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// APPROVE RECHARGE
+app.post('/api/admin/recharges/:id/approve', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const recharge = await Recharge.findById(req.params.id);
+    if (!recharge) return res.status(404).json({ error: 'Recharge non trouvée' });
+    
+    const user = await User.findById(recharge.userId);
+    const balanceBefore = user.balance;
+    user.balance += recharge.amount;
+    await user.save();
+
+    await new Transaction({
+      userId: user._id,
+      type: 'credit',
+      amount: recharge.amount,
+      description: 'Recharge approuvée',
+      balanceBefore,
+      balanceAfter: user.balance
+    }).save();
+
+    recharge.status = 'approved';
+    await recharge.save();
+
+    res.json({ success: true, message: 'Approuvé' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// REJECT RECHARGE
+app.post('/api/admin/recharges/:id/reject', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const recharge = await Recharge.findById(req.params.id);
+    if (!recharge) return res.status(404).json({ error: 'Recharge non trouvée' });
+    
+    recharge.status = 'rejected';
+    await recharge.save();
+
+    res.json({ success: true, message: 'Rejeté' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// CREATE RECHARGE REQUEST (pour les utilisateurs)
+app.post('/api/recharge-request', authMiddleware, async (req, res) => {
+  try {
+    const { amount, faucetpayUsername } = req.body;
+    if (!amount || amount < 0.25) return res.status(400).json({ error: 'Min $0.25' });
+    if (!faucetpayUsername) return res.status(400).json({ error: 'FaucetPay requis' });
+
+    const recharge = new Recharge({
+      userId: req.user._id,
+      amount,
+      faucetpayUsername,
+      status: 'pending'
+    });
+    await recharge.save();
+
+    res.json({ success: true, message: 'Demande envoyée' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Démarrage
 app.listen(PORT, async () => {

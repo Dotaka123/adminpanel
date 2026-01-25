@@ -775,6 +775,18 @@ async function createDefaultAdmin() {
     console.error('Erreur création admin:', error.message);
   }
 }
+// Route pour voir ses propres recharges
+app.get('/api/my-recharges', authMiddleware, async (req, res) => {
+  try {
+    const recharges = await Recharge.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(20);
+    
+    res.json(recharges);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.listen(PORT, async () => {
   console.log('\n╔════════════════════════════════════════╗');

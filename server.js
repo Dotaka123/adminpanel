@@ -136,6 +136,52 @@ const PRICES = {
   }
 };
 
+// ===== FONCTION HELPER: CREATE PROXY WITH PROTOCOL FALLBACK =====
+async function createProxyWithProtocolFallback(proxyData) {
+  // valeurs reçues par l'UI (ex: "http", "socks5")
+  const originalProtocol = (proxyData.protocol || '').toString().toLowerCase();
+
+  // liste des mappings candidats vers ce que l'API pourrait attendre
+  const protocolCandidates = [
+    originalProtocol,
+    originalProtocol === 'socks5' ? 'socks' : originalProtocol,
+    originalProtocol === 'socks' ? 'socks5' : originalProtocol,
+    'http',
+    'socks',
+    'socks5'
+  ].filter((v, i, a) => v && a.indexOf(v) === i); // unique
+
+  let lastError = null;
+  for (const proto of protocolCandidates) {
+    const dataToSend = { ...proxyData, protocol: proto };
+    try {
+      console.log(`🔄 Test protocol="${proto}"...`);
+      // appel principal
+      const result = await proxyApiRequest('POST', '/proxies', dataToSend);
+      console.log(`✅ Succès avec protocol="${proto}"`);
+      return result;
+    } catch (err) {
+      lastError = err;
+      // si erreur 400 avec message enum, on log et on continue pour essayer la prochaine candidate
+      const msg = err?.response?.data || err?.message || JSON.stringify(err);
+      console.warn(`❌ Erreur API en testant protocol="${proto}":`, msg);
+
+      // si l'erreur n'est pas liée au protocole enum, remonter tout de suite
+      const msgStr = String(msg).toLowerCase();
+      if (!msgStr.includes('invalid enum parameter value for "protocol"') &&
+          !msgStr.includes('invalid enum') &&
+          !(err?.response?.status === 400)) {
+        throw err; // erreur différente => on s'arrête
+      }
+
+      // sinon on continue la boucle pour tester la suivante
+    }
+  }
+
+  // si on arrive ici, aucune candidate n'a fonctionné -> throw dernier erreur
+  throw lastError || new Error('Impossible de créer proxy: protocole invalide');
+}
+
 // ========== AUTH ROUTES ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -573,9 +619,9 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
       proxyData.ip_addr = ip_addr;
     }
 
-    // ✅ APPEL L'API EXTERNE AVEC LES CREDENTIALS ADMIN
+    // ✅ APPEL L'API EXTERNE AVEC LES CREDENTIALS ADMIN + FALLBACK PROTOCOL
     console.log(`📤 Création proxy avec credentials admin pour user ${req.user.email}`);
-    const apiResponse = await proxyApiRequest('POST', '/proxies', proxyData);
+    const apiResponse = await createProxyWithProtocolFallback(proxyData);
 
     // ✅ DÉDUIT LE SOLDE DE L'UTILISATEUR
     const balanceBefore = req.user.balance;
@@ -761,28 +807,3 @@ async function createDefaultAdmin() {
       await new User({
         email: 'admin@proxyshop.com',
         password: hashedPassword,
-        balance: 0,
-        isAdmin: true
-      }).save();
-      console.log('\n👑 Admin créé: admin@proxyshop.com / admin123');
-    }
-  } catch (error) {
-    console.error('Erreur création admin:', error.message);
-  }
-}
-
-app.listen(PORT, async () => {
-  console.log('\n╔════════════════════════════════════════╗');
-  console.log('║    PROXY SHOP API - SERVEUR ACTIF      ║');
-  console.log('╚════════════════════════════════════════╝');
-  console.log(`\n🌐 Backend URL: http://localhost:${PORT}`);
-  console.log(`📋 Panel Admin: http://localhost:${PORT}/admin.html`);
-  console.log(`🔗 Frontend autorisé: ${process.env.FRONTEND_URL || 'localhost'}`);
-  
-  try {
-    await createDefaultAdmin();
-    console.log('\n✅ Système prêt!\n');
-  } catch (error) {
-    console.log('\n⚠️  Vérifiez le .env\n');
-  }
-});

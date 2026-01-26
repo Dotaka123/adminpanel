@@ -546,25 +546,77 @@ app.get('/api/service-providers', authMiddleware, async (req, res) => {
 
 app.get('/api/parent-proxies', authMiddleware, async (req, res) => {
   try {
-    const { offset = 0, pkg_id, service_provider_city_id } = req.query;
-    const params = { offset, pkg_id };
-    if (service_provider_city_id) params.service_provider_city_id = service_provider_city_id;
+    const { offset = 0, pkg_id, country_id, service_provider_city_id } = req.query;
     
+    console.log(`\n🔍 /parent-proxies - params:`, { offset, pkg_id, country_id, service_provider_city_id });
+
+    // Construire les params pour l'API externe
+    const params = { 
+      offset: parseInt(offset) || 0, 
+      pkg_id: parseInt(pkg_id) 
+    };
+
+    // Si on a un country_id, il faut d'abord récupérer les cities de ce pays
+    // puis les service_providers, puis les parent-proxies
+    if (country_id) {
+      try {
+        console.log(`📍 Récupération cities pour country_id=${country_id}...`);
+        const cities = await proxyApiRequest('GET', '/cities', null, { 
+          country_id: parseInt(country_id), 
+          pkg_id: parseInt(pkg_id) 
+        });
+
+        console.log(`✅ Cities reçues:`, cities.length);
+
+        // Utiliser la première city disponible
+        if (cities && cities.length > 0) {
+          const cityId = cities[0].id;
+          console.log(`🏙️  Utilisation city_id=${cityId}`);
+          params.service_provider_city_id = cityId;
+        }
+      } catch (err) {
+        console.warn(`⚠️  Erreur récupération cities:`, err.message);
+      }
+    }
+
+    // Si on a déjà service_provider_city_id
+    if (service_provider_city_id) {
+      params.service_provider_city_id = parseInt(service_provider_city_id);
+    }
+
+    console.log(`📤 Envoi à l'API externe:`, params);
     const data = await proxyApiRequest('GET', '/parent-proxies', null, params);
     
+    console.log(`📊 Réponse reçue - Type:`, typeof data, `- Est Array:`, Array.isArray(data));
+
+    // Normaliser la réponse
     let proxies = [];
     if (Array.isArray(data)) {
       proxies = data;
+      console.log(`✅ Format: Array direct (${proxies.length} proxies)`);
     } else if (data && data.list) {
       proxies = data.list;
+      console.log(`✅ Format: data.list (${proxies.length} proxies)`);
     } else if (data && data.data) {
       proxies = data.data;
+      console.log(`✅ Format: data.data (${proxies.length} proxies)`);
     } else if (data && data.proxies) {
       proxies = data.proxies;
+      console.log(`✅ Format: data.proxies (${proxies.length} proxies)`);
+    } else if (data && data.results) {
+      proxies = data.results;
+      console.log(`✅ Format: data.results (${proxies.length} proxies)`);
+    } else {
+      console.warn(`⚠️  Format inconnu:`, Object.keys(data || {}));
+      proxies = Array.isArray(data) ? data : [];
     }
-    
+
+    console.log(`\n✅ Envoi ${proxies.length} proxies au client\n`);
     res.json(proxies);
+    
   } catch (error) {
+    console.error(`\n❌ Erreur /parent-proxies:`, error.message);
+    console.error(`Stack:`, error.stack);
     res.json([]);
   }
 });

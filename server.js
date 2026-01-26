@@ -520,19 +520,20 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
     }).save();
 
     // Enregistrer proxy acheté
-    await new ProxyPurchase({
-      userId: req.user._id,
-      proxyId: apiResponse.id,
-      packageType: package_id === 1 ? 'golden' : 'silver',
-      duration,
-      price,
-      username: apiResponse.username,
-      password: apiResponse.password,
-      host: apiResponse.host,
-      port: apiResponse.port,
-      protocol: apiResponse.protocol,
-      expiresAt: apiResponse.expires_at
-    }).save();
+    // ✅ APRÈS (CORRECT)
+await new ProxyPurchase({
+  userId: req.user._id,
+  proxyId: apiResponse.id,
+  packageType: package_id === 1 ? 'golden' : 'silver',
+  duration,
+  price,
+  username: apiResponse.username || '',
+  password: apiResponse.password || '',
+  host: apiResponse.ip_addr,            // ✅ Utiliser ip_addr
+  port: apiResponse.port,
+  protocol: apiResponse.type,           // ✅ Utiliser type (pas protocol)
+  expiresAt: apiResponse.expire_at      // ✅ expire_at (pas expires_at)
+}).save();
 
     res.json({
       success: true,

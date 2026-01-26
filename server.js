@@ -531,18 +531,18 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
 
     // Enregistrer proxy acheté
     await new ProxyPurchase({
-      userId: req.user._id,
-      proxyId: apiResponse.id,
-      packageType: parseInt(package_id) === 1 ? 'golden' : 'silver',
-      duration: parseFloat(duration),
-      price,
-      username: apiResponse.username,
-      password: apiResponse.password,
-      host: apiResponse.host,
-      port: apiResponse.port,
-      protocol: apiResponse.protocol,
-      expiresAt: apiResponse.expires_at
-    }).save();
+  userId: req.user._id,
+  proxyId: apiResponse.id,
+  packageType: parseInt(package_id) === 1 ? 'golden' : 'silver',
+  duration: parseFloat(duration),
+  price,
+  username: apiResponse.username || '',
+  password: apiResponse.password || '',
+  host: apiResponse.ip_addr,        // ✅ ip_addr!
+  port: apiResponse.port,
+  protocol: apiResponse.type,       // ✅ type!
+  expiresAt: apiResponse.expire_at  // ✅ expire_at!
+}).save();
 
     res.json({
       success: true,

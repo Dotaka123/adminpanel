@@ -559,10 +559,11 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
 // Changer le pays d'un proxy (Uniquement pour Golden Package)
 // ✅ Changer le pays d'un proxy (Uniquement pour Golden Package)
 app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
+// ✅ Changer le pays d'un proxy (Uniquement pour Golden Package)
+app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
   try {
     const { parent_proxy_id } = req.body;
     
-    // Chercher le proxy par _id (MongoDB)
     const proxy = await ProxyPurchase.findOne({ 
       _id: req.params.id, 
       userId: req.user._id 
@@ -577,39 +578,47 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
     }
 
     if (!parent_proxy_id) {
-      return res.status(400).json({ error: 'Nouveau Proxy Parent requis' });
+      return res.status(400).json({ error: 'Parent proxy requis' });
     }
 
-    // Appel à l'API externe pour mettre à jour
+    // ✅ Appeler l'API externe avec la bonne route
     const token = await getAuthToken();
-    const apiResponse = await axios.put(`${API_BASE_URL}/proxies/${proxy.proxyId}`, {
-      parent_proxy_id: parseInt(parent_proxy_id)
-    }, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
+    const apiResponse = await axios.put(
+      `${API_BASE_URL}/proxies/${proxy.proxyId}`,  // ✅ Utilise proxyId (l'ID externe)
+      { parent_proxy_id: parseInt(parent_proxy_id) },  // ✅ Body correcte
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       }
-    }).then(r => r.data);
+    ).then(r => r.data);
 
     // Mettre à jour dans notre BDD
-    proxy.host = apiResponse.ip_addr || apiResponse.host || proxy.host;
+    proxy.host = apiResponse.ip_addr || proxy.host;
     proxy.port = apiResponse.port || proxy.port;
     proxy.username = apiResponse.username || proxy.username;
     proxy.password = apiResponse.password || proxy.password;
-    proxy.protocol = apiResponse.type || apiResponse.protocol || proxy.protocol;
-    proxy.expiresAt = apiResponse.expire_at || apiResponse.expires_at || proxy.expiresAt;
+    proxy.protocol = apiResponse.type || proxy.protocol;
+    proxy.expiresAt = apiResponse.expire_at || proxy.expiresAt;
     
     await proxy.save();
 
     res.json({
       success: true,
-      message: 'Localisation changée avec succès! 🌍',
+      message: '🌍 Localisation changée avec succès!',
       proxy: apiResponse
     });
 
   } catch (error) {
-    console.error('Erreur change-parent:', error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data?.message || error.message });
+    console.error('❌ Erreur change-parent:', error.response?.data || error.message);
+    
+    // Mapper les erreurs de l'API
+    const errorMsg = error.response?.data?.err_msg || error.message;
+    res.status(error.response?.status || 500).json({ 
+      error: errorMsg,
+      details: error.response?.data 
+    });
   }
 });
 

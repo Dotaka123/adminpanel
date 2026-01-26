@@ -556,14 +556,14 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
   }
 });
 
-// Changer le pays d'un proxy (Uniquement pour Golden Package)
-// ✅ Changer le pays d'un proxy (Uniquement pour Golden Package
 app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
   try {
     const { parent_proxy_id } = req.body;
     
+    // ❌ ERREUR: req.params.id est l'ID MongoDB
+    // ✅ Il faut utiliser proxy.proxyId (l'ID externe)
     const proxy = await ProxyPurchase.findOne({ 
-      _id: req.params.id, 
+      _id: req.params.id,  // ✅ Chercher par _id (MongoDB)
       userId: req.user._id 
     });
 
@@ -579,11 +579,17 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Parent proxy requis' });
     }
 
-    // ✅ Appeler l'API externe avec la bonne route
+    console.log('🔍 Debug:', {
+      mongoId: proxy._id,
+      externalId: proxy.proxyId,
+      parentId: parent_proxy_id
+    });
+
+    // ✅ IMPORTANT: Utiliser proxy.proxyId (pas req.params.id)
     const token = await getAuthToken();
     const apiResponse = await axios.put(
-      `${API_BASE_URL}/proxies/${proxy.proxyId}`,  // ✅ Utilise proxyId (l'ID externe)
-      { parent_proxy_id: parseInt(parent_proxy_id) },  // ✅ Body correcte
+      `${API_BASE_URL}/proxies/${proxy.proxyId}`,  // ✅ ID EXTERNE!
+      { parent_proxy_id: parseInt(parent_proxy_id) },
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -591,6 +597,8 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
         }
       }
     ).then(r => r.data);
+
+    console.log('✅ Réponse API:', apiResponse);
 
     // Mettre à jour dans notre BDD
     proxy.host = apiResponse.ip_addr || proxy.host;
@@ -609,13 +617,14 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur change-parent:', error.response?.data || error.message);
+    console.error('❌ Erreur:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    });
     
-    // Mapper les erreurs de l'API
-    const errorMsg = error.response?.data?.err_msg || error.message;
     res.status(error.response?.status || 500).json({ 
-      error: errorMsg,
-      details: error.response?.data 
+      error: error.response?.data?.err_msg || error.message
     });
   }
 });

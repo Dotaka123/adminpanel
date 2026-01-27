@@ -429,9 +429,18 @@ app.get('/api/service-providers', authMiddleware, async (req, res) => {
 
 app.get('/api/parent-proxies', authMiddleware, async (req, res) => {
   try {
-    const { offset = 0, pkg_id, service_provider_city_id } = req.query;
+    const { offset = 0, pkg_id, service_provider_city_id, country_id } = req.query;
+    
     const params = { offset, pkg_id };
-    if (service_provider_city_id) params.service_provider_city_id = service_provider_city_id;
+    
+    // ✅ Ajoute country_id s'il existe
+    if (country_id) {
+      params.country_id = parseInt(country_id);
+    }
+    
+    if (service_provider_city_id) {
+      params.service_provider_city_id = service_provider_city_id;
+    }
     
     const data = await apiRequest('GET', '/parent-proxies', null, params);
     

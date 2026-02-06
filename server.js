@@ -567,12 +567,10 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
 
 app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
   try {
-    const { parent_proxy_id } = req.body;
+    const { parent_proxy_id, protocol } = req.body;  // ✅ Extraire protocol
     
-    // ❌ ERREUR: req.params.id est l'ID MongoDB
-    // ✅ Il faut utiliser proxy.proxyId (l'ID externe)
     const proxy = await ProxyPurchase.findOne({ 
-      _id: req.params.id,  // ✅ Chercher par _id (MongoDB)
+      _id: req.params.id,
       userId: req.user._id 
     });
 
@@ -588,17 +586,18 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Parent proxy requis' });
     }
 
-    console.log('🔍 Debug:', {
-      mongoId: proxy._id,
-      externalId: proxy.proxyId,
-      parentId: parent_proxy_id
-    });
+    // ✅ Normaliser le protocol pour l'API externe : "http" ou "socks" (pas "SOCKS5")
+    let apiProtocol = (protocol || proxy.protocol || 'http').toLowerCase();
+    if (apiProtocol.includes('socks')) apiProtocol = 'socks';  // socks5 → socks
+    if (apiProtocol.includes('http')) apiProtocol = 'http';
 
-    // ✅ IMPORTANT: Utiliser proxy.proxyId (pas req.params.id)
     const token = await getAuthToken();
     const apiResponse = await axios.put(
-      `${API_BASE_URL}/proxies/${proxy.proxyId}`,  // ✅ ID EXTERNE!
-      { parent_proxy_id: parseInt(parent_proxy_id) },
+      `${API_BASE_URL}/proxies/${proxy.proxyId}`,
+      { 
+        parent_proxy_id: parseInt(parent_proxy_id),
+        protocol: apiProtocol   // ✅ AJOUTÉ !
+      },
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -606,8 +605,6 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
         }
       }
     ).then(r => r.data);
-
-    console.log('✅ Réponse API:', apiResponse);
 
     // Mettre à jour dans notre BDD
     proxy.host = apiResponse.ip_addr || proxy.host;
@@ -633,7 +630,7 @@ app.put('/api/proxies/:id/change-parent', authMiddleware, async (req, res) => {
     });
     
     res.status(error.response?.status || 500).json({ 
-      error: error.response?.data?.err_msg || error.message
+      error: error.response?.data?.message || error.message
     });
   }
 });

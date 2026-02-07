@@ -475,9 +475,39 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
   try {
     const { parent_proxy_id, package_id, protocol, duration, username, password, ip_addr } = req.body;
 
-    // Validation des champs obligatoires
+    // ✅ VALIDATION 1 : Champs obligatoires
     if (!username || !password) {
       return res.status(400).json({ error: 'Username et Password sont obligatoires pour éviter des erreurs' });
+    }
+
+    // ✅ VALIDATION 2 : Format minuscules uniquement
+    const validPattern = /^[a-z0-9_-]+$/;
+    
+    if (!validPattern.test(username)) {
+      return res.status(400).json({ 
+        error: 'Username doit contenir uniquement des lettres minuscules, chiffres, _ et -' 
+      });
+    }
+    
+    if (!validPattern.test(password)) {
+      return res.status(400).json({ 
+        error: 'Password doit contenir uniquement des lettres minuscules, chiffres, _ et -' 
+      });
+    }
+
+    // ✅ VALIDATION 3 : Vérifier si les credentials existent déjà dans notre BDD
+    const existingProxy = await ProxyPurchase.findOne({
+      $or: [
+        { username: username },
+        { password: password },
+        { username: username, password: password }
+      ]
+    });
+
+    if (existingProxy) {
+      return res.status(409).json({ 
+        error: 'Ces identifiants sont déjà utilisés. Veuillez en choisir d\'autres.' 
+      });
     }
 
     // Calcul du prix
@@ -490,7 +520,7 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
     }
     if (price === 0) return res.status(400).json({ error: 'Prix non trouvé' });
 
-    // ❌ Solde utilisateur insuffisant
+    // Vérification solde
     if (req.user.balance < price) {
       return res.status(400).json({ 
         error: 'Solde insuffisant', 
@@ -499,28 +529,47 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
       });
     }
 
-    // Préparer les données pour l'API externe (compte admin)
+    // Préparer les données pour l'API externe
     const proxyData = {
       parent_proxy_id,
       package_id: parseInt(package_id),
       protocol,
       duration: parseFloat(duration),
-      username,
-      password
+      username: username.toLowerCase(), // ✅ Force minuscules
+      password: password.toLowerCase()  // ✅ Force minuscules
     };
 
     if (ip_addr) {
       proxyData.ip_addr = ip_addr;
     }
 
-    // ❌ Achat via compte admin (API_EMAIL)
-    const token = await getAuthToken(); // récupère token avec ton compte admin
-    const apiResponse = await axios.post(`${API_BASE_URL}/proxies`, proxyData, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
+    // Achat via API externe
+    const token = await getAuthToken();
+    let apiResponse;
+    
+    try {
+      apiResponse = await axios.post(`${API_BASE_URL}/proxies`, proxyData, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      }).then(r => r.data);
+    } catch (apiError) {
+      // ✅ Gérer les erreurs spécifiques de l'API externe
+      const errorMsg = apiError.response?.data?.message || apiError.message;
+      
+      // Si l'API externe dit que c'est un duplicate
+      if (errorMsg.toLowerCase().includes('already') || 
+          errorMsg.toLowerCase().includes('exist') ||
+          errorMsg.toLowerCase().includes('duplicate')) {
+        return res.status(409).json({ 
+          error: 'Ces identifiants sont déjà utilisés sur le système. Veuillez en choisir d\'autres.' 
+        });
       }
-    }).then(r => r.data);
+      
+      // Autre erreur API
+      throw apiError;
+    }
 
     // Déduction du solde utilisateur
     const balanceBefore = req.user.balance;
@@ -540,28 +589,30 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
 
     // Enregistrer proxy acheté
     await new ProxyPurchase({
-  userId: req.user._id,
-  proxyId: apiResponse.id,
-  packageType: parseInt(package_id) === 1 ? 'golden' : 'silver',
-  duration: parseFloat(duration),
-  price,
-  username: apiResponse.username || '',
-  password: apiResponse.password || '',
-  host: apiResponse.ip_addr,        // ✅ ip_addr!
-  port: apiResponse.port,
-  protocol: apiResponse.type,       // ✅ type!
-  expiresAt: apiResponse.expire_at  // ✅ expire_at!
-}).save();
+      userId: req.user._id,
+      proxyId: apiResponse.id,
+      packageType: parseInt(package_id) === 1 ? 'golden' : 'silver',
+      duration: parseFloat(duration),
+      price,
+      username: apiResponse.username || username.toLowerCase(),
+      password: apiResponse.password || password.toLowerCase(),
+      host: apiResponse.ip_addr,
+      port: apiResponse.port,
+      protocol: apiResponse.type,
+      expiresAt: apiResponse.expire_at
+    }).save();
 
     res.json({
       success: true,
       proxy: apiResponse,
-      userBalance: req.user.balance // ✅ renvoyer le solde utilisateur après achat
+      userBalance: req.user.balance
     });
 
   } catch (error) {
     console.error('Erreur create-proxy:', error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data?.message || error.message });
+    res.status(error.response?.status || 500).json({ 
+      error: error.response?.data?.message || error.message 
+    });
   }
 });
 

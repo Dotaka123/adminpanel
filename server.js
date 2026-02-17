@@ -10,7 +10,7 @@ const { Resend } = require('resend');
 
 // ========== RESEND EMAIL CLIENT ==========
 const resend = new Resend(process.env.RESEND_API_KEY || 're_ecMhyh4x_PzMEgiNmpRGc6GFdBGufS4L7');
-const FROM_EMAIL = 'onboarding@resend.dev';
+const FROM_EMAIL = 'ProxyFlow <onboarding@resend.dev>';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 async function sendVerificationEmail(email, token) {

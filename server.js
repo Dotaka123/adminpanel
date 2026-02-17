@@ -10,7 +10,7 @@ const jwt = require('jsonwebtoken');
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || 'enlignea74@gmail.com';
-const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'Proxyshop';
+const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'ProxyFlow';
 
 async function sendEmailViaBrevo(to, subject, htmlContent) {
   try {
@@ -42,6 +42,27 @@ async function sendEmailViaBrevo(to, subject, htmlContent) {
     console.error(`   → API Key définie: ${!!BREVO_API_KEY} (commence par: ${(BREVO_API_KEY || '').slice(0, 8)}...)`);
     throw new Error(`Brevo [${status}]: ${body}`);
   }
+}
+
+// Vérifie et incrémente le rate limit email (3 emails / 10 min par user)
+async function checkEmailRateLimit(user) {
+  const now = new Date();
+  const windowMs = 10 * 60 * 1000; // 10 minutes
+
+  // Réinitialiser la fenêtre si expirée
+  if (!user.emailSentWindowStart || (now - user.emailSentWindowStart) > windowMs) {
+    user.emailSentCount = 0;
+    user.emailSentWindowStart = now;
+  }
+
+  if (user.emailSentCount >= 3) {
+    const waitMs = windowMs - (now - user.emailSentWindowStart);
+    const waitMin = Math.ceil(waitMs / 60000);
+    throw new Error(`RATE_LIMIT:${waitMin}`);
+  }
+
+  user.emailSentCount += 1;
+  await user.save();
 }
 
 async function sendVerificationEmail(email, token) {
@@ -98,6 +119,8 @@ const UserSchema = new mongoose.Schema({
   emailVerificationExpires: { type: Date, default: null },
   passwordResetToken: { type: String, default: null },
   passwordResetExpires: { type: Date, default: null },
+  emailSentCount: { type: Number, default: 0 },
+  emailSentWindowStart: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -280,13 +303,14 @@ app.post('/api/auth/register', async (req, res) => {
 
     // Envoyer l'email de vérification
     try {
+      await checkEmailRateLimit(user);
       await sendVerificationEmail(email, verificationToken);
     } catch (emailError) {
       console.error('Erreur envoi email vérification:', emailError.message);
     }
 
     res.json({
-      message: 'Compte créé ! Vérifiez votre email pour activer votre compte.',
+      message: `📧 Compte créé ! Un email de vérification a été envoyé à ${email}. Cliquez sur le lien pour activer votre compte.`,
       emailSent: true
     });
   } catch (error) {
@@ -383,8 +407,19 @@ app.post('/api/auth/resend-verification', async (req, res) => {
     if (!email) return res.status(400).json({ error: 'Email requis' });
 
     const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-    if (user.isEmailVerified) return res.status(400).json({ error: 'Email déjà vérifié' });
+    if (!user) return res.status(404).json({ error: 'Aucun compte trouvé avec cet email.' });
+    if (user.isEmailVerified) return res.status(400).json({ error: 'Votre email est déjà vérifié. Vous pouvez vous connecter.' });
+
+    // Rate limit
+    try {
+      await checkEmailRateLimit(user);
+    } catch (e) {
+      if (e.message.startsWith('RATE_LIMIT:')) {
+        const wait = e.message.split(':')[1];
+        return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${wait} minute(s).` });
+      }
+      throw e;
+    }
 
     const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
     user.emailVerificationToken = verificationToken;
@@ -392,7 +427,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
     await user.save();
 
     await sendVerificationEmail(email, verificationToken);
-    res.json({ message: 'Email de vérification renvoyé !' });
+    res.json({ message: `📧 Email de vérification envoyé à ${email}. Vérifiez votre boîte mail (et les spams).` });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -408,7 +443,18 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const user = await User.findOne({ email });
     // Toujours répondre OK pour ne pas révéler si l'email existe
     if (!user) {
-      return res.json({ message: 'Si cet email existe, vous recevrez un lien de réinitialisation.' });
+      return res.json({ message: '📧 Si cet email est associé à un compte, vous recevrez un lien de réinitialisation sous peu.' });
+    }
+
+    // Rate limit
+    try {
+      await checkEmailRateLimit(user);
+    } catch (e) {
+      if (e.message.startsWith('RATE_LIMIT:')) {
+        const wait = e.message.split(':')[1];
+        return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${wait} minute(s).` });
+      }
+      throw e;
     }
 
     const resetToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
@@ -420,9 +466,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       await sendPasswordResetEmail(email, resetToken);
     } catch (emailError) {
       console.error('Erreur envoi email reset:', emailError.message);
+      return res.status(500).json({ error: "Erreur lors de l'envoi de l'email. Réessayez dans quelques instants." });
     }
 
-    res.json({ message: 'Si cet email existe, vous recevrez un lien de réinitialisation.' });
+    res.json({ message: '📧 Un lien de réinitialisation a été envoyé à ' + email + '. Vérifiez votre boîte mail (et les spams). Ce lien expire dans 1 heure.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

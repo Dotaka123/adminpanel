@@ -6,53 +6,47 @@ const path = require('path');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-// ========== SENDX EMAIL ==========
+// ========== BREVO (ex-Sendinblue) EMAIL ==========
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
-const SENDX_API_KEY = process.env.SENDX_API_KEY;
-const SENDX_FROM_EMAIL = process.env.SENDX_FROM_EMAIL || 'demo@tryoutsendx.com';
-const SENDX_FROM_NAME = process.env.SENDX_FROM_NAME || 'Demo';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || 'enlignea74@gmail.com';
+const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'Proxyshop';
 
-async function sendEmailViaSendX(to, subject, htmlBody) {
+async function sendEmailViaBrevo(to, subject, htmlContent) {
   try {
     const response = await axios.post(
-      'https://api.sendx.io/api/v1/rest/send/email',
+      'https://api.brevo.com/v3/smtp/email',
       {
-        from: { email: SENDX_FROM_EMAIL, name: SENDX_FROM_NAME },
+        sender: { email: BREVO_FROM_EMAIL, name: BREVO_FROM_NAME },
         to: [{ email: to }],
         subject,
-        htmlBody,
-        trackClicks: true,
-        trackOpens: true
+        htmlContent
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'X-Team-ApiKey': SENDX_API_KEY
+          'api-key': BREVO_API_KEY
         },
         timeout: 10000
       }
     );
 
-    if (response.data.rejected && response.data.rejected.length > 0) {
-      throw new Error(`Email rejeté par SendX pour: ${response.data.rejected.join(', ')}`);
-    }
-
-    console.log(`✅ Email SendX envoyé à ${to} | messageId: ${response.data.messageId}`);
+    console.log(`✅ Email Brevo envoyé à ${to} | messageId: ${response.data.messageId}`);
     return response.data;
 
   } catch (err) {
     const status = err.response?.status;
     const body = JSON.stringify(err.response?.data);
-    console.error(`❌ SendX erreur [${status}] → ${body}`);
-    console.error(`   → From: ${SENDX_FROM_EMAIL} | To: ${to} | Subject: ${subject}`);
-    console.error(`   → API Key définie: ${!!SENDX_API_KEY} (commence par: ${(SENDX_API_KEY || '').slice(0, 6)}...)`);
-    throw new Error(`SendX [${status}]: ${body}`);
+    console.error(`❌ Brevo erreur [${status}] → ${body}`);
+    console.error(`   → From: ${BREVO_FROM_EMAIL} | To: ${to} | Subject: ${subject}`);
+    console.error(`   → API Key définie: ${!!BREVO_API_KEY} (commence par: ${(BREVO_API_KEY || '').slice(0, 8)}...)`);
+    throw new Error(`Brevo [${status}]: ${body}`);
   }
 }
 
 async function sendVerificationEmail(email, token) {
   const verifyUrl = `${FRONTEND_URL}/verify-email.html?token=${token}`;
-  await sendEmailViaSendX(
+  await sendEmailViaBrevo(
     email,
     '✅ Vérifiez votre adresse email - ProxyFlow',
     `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 ProxyFlow</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Vérifiez votre email</h2><p style="color:#6b7280;line-height:1.6;">Merci de vous être inscrit ! Cliquez sur le bouton ci-dessous pour activer votre compte.</p><div style="text-align:center;margin:35px 0;"><a href="${verifyUrl}" style="background:#6366f1;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">✅ Vérifier mon email</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 24 heures.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas créé de compte, ignorez cet email.</p></div></body></html>`
@@ -61,7 +55,7 @@ async function sendVerificationEmail(email, token) {
 
 async function sendPasswordResetEmail(email, token) {
   const resetUrl = `${FRONTEND_URL}/forgot-password.html?token=${token}`;
-  await sendEmailViaSendX(
+  await sendEmailViaBrevo(
     email,
     '🔐 Réinitialisation de votre mot de passe - ProxyFlow',
     `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 ProxyFlow</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Réinitialiser votre mot de passe</h2><p style="color:#6b7280;line-height:1.6;">Vous avez demandé à réinitialiser votre mot de passe. Cliquez sur le bouton ci-dessous pour en choisir un nouveau.</p><div style="text-align:center;margin:35px 0;"><a href="${resetUrl}" style="background:#ef4444;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">🔐 Réinitialiser le mot de passe</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 1 heure.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas fait cette demande, ignorez cet email. Votre mot de passe reste inchangé.</p></div></body></html>`

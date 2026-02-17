@@ -9,14 +9,15 @@ const jwt = require('jsonwebtoken');
 // ========== SENDX EMAIL ==========
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const SENDX_API_KEY = process.env.SENDX_API_KEY;
-const SENDX_FROM_EMAIL = process.env.SENDX_FROM_EMAIL || 'support@proxyflow.com';
+const SENDX_FROM_EMAIL = process.env.SENDX_FROM_EMAIL || 'demo@tryoutsendx.com';
+const SENDX_FROM_NAME = process.env.SENDX_FROM_NAME || 'Demo';
 
 async function sendEmailViaSendX(to, subject, htmlBody) {
   try {
     const response = await axios.post(
       'https://api.sendx.io/api/v1/rest/send/email',
       {
-        from: { email: SENDX_FROM_EMAIL },
+        from: { email: SENDX_FROM_EMAIL, name: SENDX_FROM_NAME },
         to: [{ email: to }],
         subject,
         htmlBody,

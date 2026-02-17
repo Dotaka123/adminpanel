@@ -6,6 +6,32 @@ const path = require('path');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { Resend } = require('resend');
+
+// ========== RESEND EMAIL CLIENT ==========
+const resend = new Resend(process.env.RESEND_API_KEY || 're_ecMhyh4x_PzMEgiNmpRGc6GFdBGufS4L7');
+const FROM_EMAIL = 'onboarding@resend.dev';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+async function sendVerificationEmail(email, token) {
+  const verifyUrl = `${FRONTEND_URL}/verify-email.html?token=${token}`;
+  await resend.emails.send({
+    from: FROM_EMAIL,
+    to: email,
+    subject: '✅ Vérifiez votre adresse email - Proxy Shop',
+    html: `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 Proxy Shop</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Vérifiez votre email</h2><p style="color:#6b7280;line-height:1.6;">Merci de vous être inscrit ! Cliquez sur le bouton ci-dessous pour activer votre compte.</p><div style="text-align:center;margin:35px 0;"><a href="${verifyUrl}" style="background:#6366f1;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">✅ Vérifier mon email</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 24 heures.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas créé de compte, ignorez cet email.</p></div></body></html>`
+  });
+}
+
+async function sendPasswordResetEmail(email, token) {
+  const resetUrl = `${FRONTEND_URL}/forgot-password.html?token=${token}`;
+  await resend.emails.send({
+    from: FROM_EMAIL,
+    to: email,
+    subject: '🔐 Réinitialisation de votre mot de passe - Proxy Shop',
+    html: `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 Proxy Shop</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Réinitialiser votre mot de passe</h2><p style="color:#6b7280;line-height:1.6;">Vous avez demandé à réinitialiser votre mot de passe. Cliquez sur le bouton ci-dessous pour en choisir un nouveau.</p><div style="text-align:center;margin:35px 0;"><a href="${resetUrl}" style="background:#ef4444;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">🔐 Réinitialiser le mot de passe</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 1 heure.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas fait cette demande, ignorez cet email. Votre mot de passe reste inchangé.</p></div></body></html>`
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -38,6 +64,11 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true },
   balance: { type: Number, default: 0 },
   isAdmin: { type: Boolean, default: false },
+  isEmailVerified: { type: Boolean, default: false },
+  emailVerificationToken: { type: String, default: null },
+  emailVerificationExpires: { type: Date, default: null },
+  passwordResetToken: { type: String, default: null },
+  passwordResetExpires: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -203,24 +234,31 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Générer un token de vérification unique
+    const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
+
     const user = new User({
       email,
       password: hashedPassword,
-      balance: 0
+      balance: 0,
+      isEmailVerified: false,
+      emailVerificationToken: verificationToken,
+      emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000)
     });
 
     await user.save();
 
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    // Envoyer l'email de vérification
+    try {
+      await sendVerificationEmail(email, verificationToken);
+    } catch (emailError) {
+      console.error('Erreur envoi email vérification:', emailError.message);
+    }
 
     res.json({
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        balance: user.balance,
-        isAdmin: user.isAdmin
-      }
+      message: 'Compte créé ! Vérifiez votre email pour activer votre compte.',
+      emailSent: true
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -239,6 +277,14 @@ app.post('/api/auth/login', async (req, res) => {
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+    }
+
+    // Vérifier si l'email est confirmé (sauf pour les admins)
+    if (!user.isEmailVerified && !user.isAdmin) {
+      return res.status(403).json({ 
+        error: 'Veuillez vérifier votre email avant de vous connecter.',
+        emailNotVerified: true
+      });
     }
 
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
@@ -264,6 +310,127 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     balance: req.user.balance,
     isAdmin: req.user.isAdmin
   });
+});
+
+// ========== VÉRIFICATION EMAIL ==========
+
+app.get('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token manquant' });
+
+    // Vérifier le JWT
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'Lien expiré ou invalide. Demandez un nouvel email de vérification.' });
+    }
+
+    const user = await User.findOne({ emailVerificationToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Lien déjà utilisé ou invalide.' });
+    }
+
+    if (user.isEmailVerified) {
+      return res.json({ message: 'Email déjà vérifié. Vous pouvez vous connecter.' });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = null;
+    user.emailVerificationExpires = null;
+    await user.save();
+
+    res.json({ message: 'Email vérifié avec succès ! Vous pouvez maintenant vous connecter.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Renvoyer l'email de vérification
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    if (user.isEmailVerified) return res.status(400).json({ error: 'Email déjà vérifié' });
+
+    const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+
+    await sendVerificationEmail(email, verificationToken);
+    res.json({ message: 'Email de vérification renvoyé !' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== MOT DE PASSE OUBLIÉ ==========
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    // Toujours répondre OK pour ne pas révéler si l'email existe
+    if (!user) {
+      return res.json({ message: 'Si cet email existe, vous recevrez un lien de réinitialisation.' });
+    }
+
+    const resetToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
+    user.passwordResetToken = resetToken;
+    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
+    await user.save();
+
+    try {
+      await sendPasswordResetEmail(email, resetToken);
+    } catch (emailError) {
+      console.error('Erreur envoi email reset:', emailError.message);
+    }
+
+    res.json({ message: 'Si cet email existe, vous recevrez un lien de réinitialisation.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token et nouveau mot de passe requis' });
+    if (password.length < 6) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères' });
+
+    // Vérifier le JWT
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'Lien expiré ou invalide. Demandez un nouveau lien.' });
+    }
+
+    const user = await User.findOne({ passwordResetToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Lien déjà utilisé ou invalide.' });
+    }
+
+    if (user.passwordResetExpires < new Date()) {
+      return res.status(400).json({ error: 'Lien expiré. Demandez un nouveau lien de réinitialisation.' });
+    }
+
+    user.password = await bcrypt.hash(password, 10);
+    user.passwordResetToken = null;
+    user.passwordResetExpires = null;
+    await user.save();
+
+    res.json({ message: 'Mot de passe réinitialisé avec succès ! Vous pouvez maintenant vous connecter.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ========== ROUTES ADMIN ==========
@@ -812,7 +979,8 @@ async function createDefaultAdmin() {
         email: 'admin@proxyshop.com',
         password: hashedPassword,
         balance: 0,
-        isAdmin: true
+        isAdmin: true,
+        isEmailVerified: true
       }).save();
       console.log('\n👑 Admin créé: admin@proxyshop.com / admin123');
     }

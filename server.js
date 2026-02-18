@@ -142,22 +142,39 @@ app.post('/api/auth/register', async (req, res) => {
     const existingUser = await User.findOne({ email });
     if (existingUser) return res.status(400).json({ error: 'Email déjà utilisé' });
 
+    const crypto = require('crypto');
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ 
       email, 
       password: hashedPassword,
-      balance: 0
+      balance: 0,
+      isEmailVerified: false,
+      emailVerificationToken: verificationToken,
+      emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24h
     });
 
     await user.save();
 
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
+    // Envoyer l'email de vérification
+    const verifyUrl = `${FRONTEND_URL}/verify-email.html?token=${verificationToken}`;
+    try {
+      await sendEmailViaBrevo(email, '📧 Confirmez votre email - ProxyFlow', `
+        <h2>Bienvenue sur ProxyFlow !</h2>
+        <p>Merci de vous être inscrit. Cliquez sur le lien ci-dessous pour activer votre compte :</p>
+        <a href="${verifyUrl}" style="background:#6366f1;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin:16px 0;">Activer mon compte</a>
+        <p>Ce lien expire dans 24 heures.</p>
+      `);
+    } catch (emailErr) {
+      console.error('⚠️ Email de vérification non envoyé:', emailErr.message);
+    }
 
     res.json({
       success: true,
-      message: 'Inscription réussie',
-      user: { id: user._id, email: user.email },
-      token
+      message: 'Inscription réussie ! Vérifiez votre email pour activer votre compte.',
+      user: { id: user._id, email: user.email }
+      // Pas de token : l'utilisateur doit d'abord vérifier son email
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -175,6 +192,14 @@ app.post('/api/auth/login', async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
 
+    // Vérifier si l'email est confirmé
+    if (!user.isEmailVerified) {
+      return res.status(403).json({
+        error: 'Veuillez vérifier votre email avant de vous connecter.',
+        emailNotVerified: true
+      });
+    }
+
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
 
     res.json({
@@ -183,6 +208,115 @@ app.post('/api/auth/login', async (req, res) => {
       user: { id: user._id, email: user.email, isAdmin: user.isAdmin },
       token
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Vérification email via token
+app.get('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token manquant' });
+
+    const user = await User.findOne({
+      emailVerificationToken: token,
+      emailVerificationExpires: { $gt: new Date() }
+    });
+
+    if (!user) return res.status(400).json({ error: 'Token invalide ou expiré' });
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = null;
+    user.emailVerificationExpires = null;
+    await user.save();
+
+    res.json({ success: true, message: 'Email vérifié avec succès ! Vous pouvez maintenant vous connecter.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Renvoyer l'email de vérification
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    if (user.isEmailVerified) return res.status(400).json({ error: 'Email déjà vérifié' });
+
+    const crypto = require('crypto');
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+    await user.save();
+
+    const verifyUrl = `${FRONTEND_URL}/verify-email.html?token=${verificationToken}`;
+    await sendEmailViaBrevo(email, '📧 Vérifiez votre email - ProxyFlow', `
+      <h2>Vérification de votre email</h2>
+      <p>Cliquez sur le lien ci-dessous pour vérifier votre adresse email :</p>
+      <a href="${verifyUrl}" style="background:#6366f1;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin:16px 0;">Vérifier mon email</a>
+      <p>Ce lien expire dans 24 heures.</p>
+    `);
+
+    res.json({ success: true, message: 'Email de vérification envoyé !' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mot de passe oublié
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    // On répond toujours "ok" pour ne pas révéler si l'email existe
+    if (!user) return res.json({ success: true, message: 'Si cet email existe, un lien vous a été envoyé.' });
+
+    const crypto = require('crypto');
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.passwordResetToken = resetToken;
+    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1h
+    await user.save();
+
+    const resetUrl = `${FRONTEND_URL}/forgot-password.html?token=${resetToken}`;
+    await sendEmailViaBrevo(email, '🔐 Réinitialisation de votre mot de passe - ProxyFlow', `
+      <h2>Réinitialisation du mot de passe</h2>
+      <p>Vous avez demandé une réinitialisation de votre mot de passe.</p>
+      <a href="${resetUrl}" style="background:#6366f1;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin:16px 0;">Réinitialiser mon mot de passe</a>
+      <p>Ce lien expire dans 1 heure. Si vous n'avez pas fait cette demande, ignorez cet email.</p>
+    `);
+
+    res.json({ success: true, message: 'Si cet email existe, un lien vous a été envoyé.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Réinitialiser le mot de passe
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token et mot de passe requis' });
+    if (password.length < 6) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères' });
+
+    const user = await User.findOne({
+      passwordResetToken: token,
+      passwordResetExpires: { $gt: new Date() }
+    });
+
+    if (!user) return res.status(400).json({ error: 'Token invalide ou expiré' });
+
+    user.password = await bcrypt.hash(password, 10);
+    user.passwordResetToken = null;
+    user.passwordResetExpires = null;
+    await user.save();
+
+    res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

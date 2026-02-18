@@ -961,6 +961,96 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
   }
 });
 
+// ========== DASHBOARD UTILISATEUR ==========
+app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+
+    // Récupérer les proxies de l'utilisateur
+    const proxiesList = await ProxyPurchase.find({ userId: user._id }).sort({ createdAt: -1 });
+
+    // Calculer les stats en fonction de la date d'expiration
+    const now = new Date();
+    let active = 0, expiringSoon = 0, expired = 0;
+
+    const formattedProxies = proxiesList.map(p => {
+      const expiresAt = p.expiresAt ? new Date(p.expiresAt) : null;
+      let status = 'active';
+      let daysRemaining = null;
+
+      if (expiresAt) {
+        const diffMs = expiresAt - now;
+        daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        if (daysRemaining <= 0) {
+          status = 'expired';
+          expired++;
+        } else if (daysRemaining <= 7) {
+          status = 'expiring_soon';
+          expiringSoon++;
+        } else {
+          status = 'active';
+          active++;
+        }
+      } else {
+        active++;
+      }
+
+      return {
+        id: p._id,
+        proxyId: p.proxyId,
+        type: (p.protocol || 'HTTP').toUpperCase(),
+        packageName: p.packageType || '—',
+        host: p.host,
+        port: p.port,
+        username: p.username,
+        password: p.password,
+        protocol: p.protocol,
+        purchaseDate: p.createdAt,
+        expiresAt: p.expiresAt,
+        daysRemaining,
+        status
+      };
+    });
+
+    // Générer les alertes pour proxies qui expirent bientôt
+    const alerts = formattedProxies
+      .filter(p => p.status === 'expiring_soon' || p.status === 'expired')
+      .map(p => ({
+        message: p.status === 'expired'
+          ? `⚠️ Proxy ${p.type} expiré depuis ${Math.abs(p.daysRemaining)} jour(s)`
+          : `🔔 Proxy ${p.type} expire dans ${p.daysRemaining} jour(s)`,
+        createdAt: new Date()
+      }));
+
+    // Récupérer les dernières transactions
+    const transactions = await Transaction.find({ userId: user._id })
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    res.json({
+      user: {
+        id: user._id,
+        email: user.email,
+        balance: user.balance,
+        isAdmin: user.isAdmin
+      },
+      proxies: {
+        active,
+        expiringSoon,
+        expired,
+        totalProxies: proxiesList.length
+      },
+      proxiesList: formattedProxies,
+      alerts,
+      transactions
+    });
+
+  } catch (error) {
+    console.error('Erreur dashboard:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 app.get('/api/stats', async (req, res) => {
   try {
     const data = await apiRequest('GET', '/service-stats');

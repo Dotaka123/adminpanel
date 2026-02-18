@@ -342,24 +342,60 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
   }
 });
 
+// ========== HELPER : parser la durée depuis la description ==========
+function parseDurationFromDescription(description) {
+  if (!description) return null;
+  // Ex: "30j", "30 jours", "0.02 jour(s)", "1 jour(s)", "30 days"
+  const match = description.match(/(\d+(?:\.\d+)?)\s*(?:jour|day|j)/i);
+  if (match) return parseFloat(match[1]);
+  return null;
+}
+
+// ========== HELPER : normaliser le type proxy ==========
+function normalizeProxyType(rawType) {
+  if (!rawType) return 'PROXY';
+  const t = rawType.toString().toUpperCase();
+  if (t.includes('STATIC_ISP') || t.includes('STATIC ISP')) return 'STATIC_ISP';
+  if (t.includes('ISP')) return 'ISP';
+  if (t.includes('SOCKS5')) return 'SOCKS5';
+  if (t.includes('SOCKS')) return 'SOCKS';
+  if (t.includes('HTTP')) return 'HTTP';
+  if (t.includes('RESIDENTIAL') || t.includes('RESI')) return 'RESIDENTIAL';
+  if (t.includes('DATACENTER') || t.includes('DC')) return 'DATACENTER';
+  return t;
+}
+
 // Dashboard Utilisateur
 app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
   try {
     const now = new Date();
 
-    // Récupérer tous les achats de proxies de l'utilisateur
+    // Récupérer TOUTES les transactions purchase (avec ou sans proxyDetails)
     const proxyPurchases = await Transaction.find({
       userId: req.userId,
-      type: 'purchase',
-      proxyDetails: { $exists: true, $ne: null }
+      type: 'purchase'
     }).sort({ createdAt: -1 });
 
-    // Construire la liste des proxies avec leur statut d'expiration
+    // Construire la liste des proxies
     const proxiesList = proxyPurchases.map(t => {
       const pd = t.proxyDetails || {};
-      const expiresAt = pd.expiresAt ? new Date(pd.expiresAt) : null;
+
+      // Récupérer ou calculer la date d'expiration
+      let expiresAt = null;
+      if (pd.expiresAt) {
+        expiresAt = new Date(pd.expiresAt);
+      } else {
+        // Calculer depuis createdAt + durée extraite de la description ou proxyDetails
+        const durationDays = pd.durationDays || pd.duration
+          || parseDurationFromDescription(t.description)
+          || parseDurationFromDescription(pd.description);
+        if (durationDays && durationDays > 0.05) { // ignorer les durées < ~1h (test)
+          expiresAt = new Date(t.createdAt.getTime() + durationDays * 24 * 60 * 60 * 1000);
+        }
+      }
+
       const daysRemaining = expiresAt
-        ? Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24))
+        ? Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
         : null;
 
       let status = 'active';
@@ -368,25 +404,49 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
         else if (daysRemaining <= 7) status = 'expiring_soon';
       }
 
+      // Extraire les infos de connexion depuis proxyDetails ou deliveryNotes
+      const rawType = pd.type || pd.proxyType || pd.proxy_type || '';
+      const proxyType = normalizeProxyType(rawType) || 'PROXY';
+
+      // Construire la string host:port si disponible
+      const host = pd.host || pd.ip || pd.server || null;
+      const port = pd.port || null;
+      const username = pd.username || pd.user || pd.login || null;
+      const password = pd.password || pd.pass || null;
+      const protocol = pd.protocol || (proxyType.includes('SOCKS') ? 'socks5' : 'http');
+
+      // Infos de connexion lisibles
+      let connectionString = null;
+      if (host && port && username && password) {
+        connectionString = `${protocol}://${username}:${password}@${host}:${port}`;
+      } else if (host && port) {
+        connectionString = `${host}:${port}`;
+      }
+
+      // Notes de livraison brutes (si l'admin a mis du texte libre)
+      const deliveryNotes = pd.deliveryNotes || pd.notes || pd.info || null;
+
       return {
         id: t._id,
-        type: pd.type || 'residential',
+        type: proxyType,
         packageName: pd.packageName || pd.name || t.description || 'Proxy',
-        host: pd.host || null,
-        port: pd.port || null,
-        username: pd.username || null,
-        password: pd.password || null,
-        protocol: pd.protocol || 'http',
-        country: pd.country || null,
+        host,
+        port,
+        username,
+        password,
+        protocol,
+        connectionString,
+        deliveryNotes,
+        country: pd.country || pd.location || null,
         purchaseDate: t.createdAt,
-        expiresAt: expiresAt,
-        daysRemaining: daysRemaining,
+        expiresAt,
+        daysRemaining,
         status,
         amount: t.amount
       };
     });
 
-    // Calculer les stats
+    // Stats
     const proxySummary = {
       totalProxies: proxiesList.length,
       active: proxiesList.filter(p => p.status === 'active').length,
@@ -394,12 +454,12 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
       expired: proxiesList.filter(p => p.status === 'expired').length
     };
 
-    // Récupérer les alertes
+    // Alertes récentes
     const recentAlerts = await ExpirationAlert.find({ userId: req.userId })
       .sort({ createdAt: -1 })
       .limit(5);
 
-    // Transactions récentes (toutes, pas que les achats)
+    // Toutes les transactions récentes
     const recentTransactions = await Transaction.find({ userId: req.userId })
       .sort({ createdAt: -1 })
       .limit(10);

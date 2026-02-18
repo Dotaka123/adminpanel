@@ -6,6 +6,82 @@ const path = require('path');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+// ========== BREVO (ex-Sendinblue) EMAIL ==========
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || 'enlignea74@gmail.com';
+const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'ProxyFlow';
+
+async function sendEmailViaBrevo(to, subject, htmlContent) {
+  try {
+    const response = await axios.post(
+      'https://api.brevo.com/v3/smtp/email',
+      {
+        sender: { email: BREVO_FROM_EMAIL, name: BREVO_FROM_NAME },
+        to: [{ email: to }],
+        subject,
+        htmlContent
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': BREVO_API_KEY
+        },
+        timeout: 10000
+      }
+    );
+
+    console.log(`✅ Email Brevo envoyé à ${to} | messageId: ${response.data.messageId}`);
+    return response.data;
+
+  } catch (err) {
+    const status = err.response?.status;
+    const body = JSON.stringify(err.response?.data);
+    console.error(`❌ Brevo erreur [${status}] → ${body}`);
+    console.error(`   → From: ${BREVO_FROM_EMAIL} | To: ${to} | Subject: ${subject}`);
+    console.error(`   → API Key définie: ${!!BREVO_API_KEY} (commence par: ${(BREVO_API_KEY || '').slice(0, 8)}...)`);
+    throw new Error(`Brevo [${status}]: ${body}`);
+  }
+}
+
+// Vérifie et incrémente le rate limit email (3 emails / 10 min par user)
+async function checkEmailRateLimit(user) {
+  const now = new Date();
+  const windowMs = 10 * 60 * 1000; // 10 minutes
+
+  // Réinitialiser la fenêtre si expirée
+  if (!user.emailSentWindowStart || (now - user.emailSentWindowStart) > windowMs) {
+    user.emailSentCount = 0;
+    user.emailSentWindowStart = now;
+  }
+
+  if (user.emailSentCount >= 3) {
+    const waitMs = windowMs - (now - user.emailSentWindowStart);
+    const waitMin = Math.ceil(waitMs / 60000);
+    throw new Error(`RATE_LIMIT:${waitMin}`);
+  }
+
+  user.emailSentCount += 1;
+  await user.save();
+}
+
+async function sendVerificationEmail(email, token) {
+  const verifyUrl = `${FRONTEND_URL}/verify-email.html?token=${token}`;
+  await sendEmailViaBrevo(
+    email,
+    '✅ Vérifiez votre adresse email - ProxyFlow',
+    `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 ProxyFlow</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Vérifiez votre email</h2><p style="color:#6b7280;line-height:1.6;">Merci de vous être inscrit ! Cliquez sur le bouton ci-dessous pour activer votre compte.</p><div style="text-align:center;margin:35px 0;"><a href="${verifyUrl}" style="background:#6366f1;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">✅ Vérifier mon email</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 24 heures.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas créé de compte, ignorez cet email.</p></div></body></html>`
+  );
+}
+
+async function sendPasswordResetEmail(email, token) {
+  const resetUrl = `${FRONTEND_URL}/forgot-password.html?token=${token}`;
+  await sendEmailViaBrevo(
+    email,
+    '🔐 Réinitialisation de votre mot de passe - ProxyFlow',
+    `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><div style="text-align:center;margin-bottom:30px;"><h1 style="color:#6366f1;font-size:28px;margin:0;">🌐 ProxyFlow</h1></div><h2 style="color:#1f2937;margin-bottom:10px;">Réinitialiser votre mot de passe</h2><p style="color:#6b7280;line-height:1.6;">Vous avez demandé à réinitialiser votre mot de passe. Cliquez sur le bouton ci-dessous pour en choisir un nouveau.</p><div style="text-align:center;margin:35px 0;"><a href="${resetUrl}" style="background:#ef4444;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;">🔐 Réinitialiser le mot de passe</a></div><p style="color:#9ca3af;font-size:13px;text-align:center;">Ce lien expire dans 1 heure.</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:25px 0;"><p style="color:#9ca3af;font-size:12px;text-align:center;">Si vous n'avez pas fait cette demande, ignorez cet email. Votre mot de passe reste inchangé.</p></div></body></html>`
+  );
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -38,6 +114,13 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true },
   balance: { type: Number, default: 0 },
   isAdmin: { type: Boolean, default: false },
+  isEmailVerified: { type: Boolean, default: false },
+  emailVerificationToken: { type: String, default: null },
+  emailVerificationExpires: { type: Date, default: null },
+  passwordResetToken: { type: String, default: null },
+  passwordResetExpires: { type: Date, default: null },
+  emailSentCount: { type: Number, default: 0 },
+  emailSentWindowStart: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -203,24 +286,32 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Générer un token de vérification unique
+    const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
+
     const user = new User({
       email,
       password: hashedPassword,
-      balance: 0
+      balance: 0,
+      isEmailVerified: false,
+      emailVerificationToken: verificationToken,
+      emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000)
     });
 
     await user.save();
 
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    // Envoyer l'email de vérification
+    try {
+      await checkEmailRateLimit(user);
+      await sendVerificationEmail(email, verificationToken);
+    } catch (emailError) {
+      console.error('Erreur envoi email vérification:', emailError.message);
+    }
 
     res.json({
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        balance: user.balance,
-        isAdmin: user.isAdmin
-      }
+      message: `📧 Compte créé ! Un email de vérification a été envoyé à ${email}. Cliquez sur le lien pour activer votre compte.`,
+      emailSent: true
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -239,6 +330,14 @@ app.post('/api/auth/login', async (req, res) => {
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+    }
+
+    // Vérifier si l'email est confirmé (sauf pour les admins)
+    if (!user.isEmailVerified && !user.isAdmin) {
+      return res.status(403).json({ 
+        error: 'Veuillez vérifier votre email avant de vous connecter.',
+        emailNotVerified: true
+      });
     }
 
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
@@ -264,6 +363,150 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     balance: req.user.balance,
     isAdmin: req.user.isAdmin
   });
+});
+
+// ========== VÉRIFICATION EMAIL ==========
+
+app.get('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token manquant' });
+
+    // Vérifier le JWT
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'Lien expiré ou invalide. Demandez un nouvel email de vérification.' });
+    }
+
+    const user = await User.findOne({ emailVerificationToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Lien déjà utilisé ou invalide.' });
+    }
+
+    if (user.isEmailVerified) {
+      return res.json({ message: 'Email déjà vérifié. Vous pouvez vous connecter.' });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = null;
+    user.emailVerificationExpires = null;
+    await user.save();
+
+    res.json({ message: 'Email vérifié avec succès ! Vous pouvez maintenant vous connecter.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Renvoyer l'email de vérification
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'Aucun compte trouvé avec cet email.' });
+    if (user.isEmailVerified) return res.status(400).json({ error: 'Votre email est déjà vérifié. Vous pouvez vous connecter.' });
+
+    // Rate limit
+    try {
+      await checkEmailRateLimit(user);
+    } catch (e) {
+      if (e.message.startsWith('RATE_LIMIT:')) {
+        const wait = e.message.split(':')[1];
+        return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${wait} minute(s).` });
+      }
+      throw e;
+    }
+
+    const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+
+    await sendVerificationEmail(email, verificationToken);
+    res.json({ message: `📧 Email de vérification envoyé à ${email}. Vérifiez votre boîte mail (et les spams).` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== MOT DE PASSE OUBLIÉ ==========
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const user = await User.findOne({ email });
+    // Toujours répondre OK pour ne pas révéler si l'email existe
+    if (!user) {
+      return res.json({ message: '📧 Si cet email est associé à un compte, vous recevrez un lien de réinitialisation sous peu.' });
+    }
+
+    // Rate limit
+    try {
+      await checkEmailRateLimit(user);
+    } catch (e) {
+      if (e.message.startsWith('RATE_LIMIT:')) {
+        const wait = e.message.split(':')[1];
+        return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${wait} minute(s).` });
+      }
+      throw e;
+    }
+
+    const resetToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
+    user.passwordResetToken = resetToken;
+    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
+    await user.save();
+
+    try {
+      await sendPasswordResetEmail(email, resetToken);
+    } catch (emailError) {
+      console.error('Erreur envoi email reset:', emailError.message);
+      return res.status(500).json({ error: "Erreur lors de l'envoi de l'email. Réessayez dans quelques instants." });
+    }
+
+    res.json({ message: '📧 Un lien de réinitialisation a été envoyé à ' + email + '. Vérifiez votre boîte mail (et les spams). Ce lien expire dans 1 heure.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token et nouveau mot de passe requis' });
+    if (password.length < 6) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères' });
+
+    // Vérifier le JWT
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'Lien expiré ou invalide. Demandez un nouveau lien.' });
+    }
+
+    const user = await User.findOne({ passwordResetToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Lien déjà utilisé ou invalide.' });
+    }
+
+    if (user.passwordResetExpires < new Date()) {
+      return res.status(400).json({ error: 'Lien expiré. Demandez un nouveau lien de réinitialisation.' });
+    }
+
+    user.password = await bcrypt.hash(password, 10);
+    user.passwordResetToken = null;
+    user.passwordResetExpires = null;
+    await user.save();
+
+    res.json({ message: 'Mot de passe réinitialisé avec succès ! Vous pouvez maintenant vous connecter.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ========== ROUTES ADMIN ==========
@@ -812,7 +1055,8 @@ async function createDefaultAdmin() {
         email: 'admin@proxyshop.com',
         password: hashedPassword,
         balance: 0,
-        isAdmin: true
+        isAdmin: true,
+        isEmailVerified: true
       }).save();
       console.log('\n👑 Admin créé: admin@proxyshop.com / admin123');
     }
@@ -938,6 +1182,207 @@ app.post('/api/admin/recharges/:id/reject', authMiddleware, adminMiddleware, asy
     await recharge.save();
 
     res.json({ success: true, message: 'Recharge rejetée' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+
+// ========== COMMANDES MANUELLES (Datacenter, Residential, Static ISP) ==========
+
+const ManualOrderSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, required: true }, // datacenter | residential | residential_pro | static_isp
+  typeLabel: { type: String, required: true },
+  volume: { type: String, required: true }, // ex: "10 GB" ou "5 IPs"
+  totalPrice: { type: Number, required: true },
+  notes: { type: String, default: '' },
+  status: { type: String, enum: ['pending', 'processing', 'delivered', 'cancelled'], default: 'pending' },
+  deliveryNotes: { type: String, default: '' }, // notes admin lors de la livraison
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const ManualOrder = mongoose.model('ManualOrder', ManualOrderSchema);
+
+// Passer une commande manuelle (côté client)
+app.post('/api/manual-order', authMiddleware, async (req, res) => {
+  try {
+    const { type, typeLabel, volume, totalPrice, notes } = req.body;
+
+    if (!type || !typeLabel || !volume || !totalPrice) {
+      return res.status(400).json({ error: 'Données de commande incomplètes' });
+    }
+
+    if (totalPrice <= 0) {
+      return res.status(400).json({ error: 'Prix invalide' });
+    }
+
+    // Vérification solde
+    if (req.user.balance < totalPrice) {
+      return res.status(400).json({
+        error: `Solde insuffisant. Il vous faut $${totalPrice.toFixed(2)}, vous avez $${req.user.balance.toFixed(2)}.`,
+        required: totalPrice,
+        balance: req.user.balance
+      });
+    }
+
+    // Débiter le solde
+    const balanceBefore = req.user.balance;
+    req.user.balance = parseFloat((req.user.balance - totalPrice).toFixed(2));
+    await req.user.save();
+
+    // Créer la commande
+    const order = new ManualOrder({
+      userId: req.user._id,
+      type,
+      typeLabel,
+      volume,
+      totalPrice,
+      notes: notes || ''
+    });
+    await order.save();
+
+    // Enregistrer transaction
+    await new Transaction({
+      userId: req.user._id,
+      type: 'purchase',
+      amount: totalPrice,
+      description: `Commande ${typeLabel} - ${volume}`,
+      balanceBefore,
+      balanceAfter: req.user.balance,
+      proxyDetails: { orderId: order._id, type, volume }
+    }).save();
+
+    res.json({
+      success: true,
+      message: `Commande envoyée ! Notre équipe va vous livrer vos proxies ${typeLabel} sous peu.`,
+      orderId: order._id,
+      userBalance: req.user.balance
+    });
+
+  } catch (error) {
+    console.error('Erreur manual-order:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mes commandes manuelles (côté client)
+app.get('/api/my-manual-orders', authMiddleware, async (req, res) => {
+  try {
+    const orders = await ManualOrder.find({ userId: req.user._id }).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ========== ROUTES ADMIN - COMMANDES MANUELLES ==========
+
+// Lister toutes les commandes manuelles
+app.get('/api/admin/manual-orders', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const orders = await ManualOrder.find()
+      .populate('userId', 'email balance')
+      .sort({ createdAt: -1 });
+
+    const formatted = orders.map(o => ({
+      ...o._doc,
+      userEmail: o.userId?.email || 'N/A'
+    }));
+
+    res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Marquer comme "en cours"
+app.post('/api/admin/manual-orders/:id/processing', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    order.status = 'processing';
+    order.updatedAt = new Date();
+    await order.save();
+
+    res.json({ success: true, message: 'Commande marquée en traitement' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Livrer une commande (marquer delivered + ajouter notes)
+app.post('/api/admin/manual-orders/:id/deliver', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { deliveryNotes } = req.body;
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    if (order.status === 'delivered') {
+      return res.status(400).json({ error: 'Commande déjà livrée' });
+    }
+
+    order.status = 'delivered';
+    order.deliveryNotes = deliveryNotes || '';
+    order.updatedAt = new Date();
+    await order.save();
+
+    // Enregistrer un proxy manuel dans ProxyPurchase pour que le client le voit dans "Mes proxies"
+    if (deliveryNotes) {
+      await new ProxyPurchase({
+        userId: order.userId,
+        packageType: order.type,
+        price: order.totalPrice,
+        host: deliveryNotes, // les credentials/infos de connexion dans le champ host
+        port: 0,
+        username: '',
+        password: '',
+        protocol: 'http',
+        expiresAt: null
+      }).save();
+    }
+
+    res.json({ success: true, message: 'Commande livrée avec succès' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Annuler une commande + rembourser
+app.post('/api/admin/manual-orders/:id/cancel', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    if (['delivered', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Commande déjà traitée ou annulée' });
+    }
+
+    const user = await User.findById(order.userId);
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+
+    // Rembourser
+    const balanceBefore = user.balance;
+    user.balance = parseFloat((user.balance + order.totalPrice).toFixed(2));
+    await user.save();
+
+    order.status = 'cancelled';
+    order.updatedAt = new Date();
+    await order.save();
+
+    // Transaction remboursement
+    await new Transaction({
+      userId: user._id,
+      type: 'credit',
+      amount: order.totalPrice,
+      description: `Remboursement commande annulée - ${order.typeLabel} ${order.volume}`,
+      balanceBefore,
+      balanceAfter: user.balance
+    }).save();
+
+    res.json({ success: true, message: 'Commande annulée et remboursée', newBalance: user.balance });
   } catch (error) {
     res.status(500).json({ error: 'Erreur serveur' });
   }

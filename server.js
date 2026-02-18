@@ -1188,6 +1188,207 @@ app.post('/api/admin/recharges/:id/reject', authMiddleware, adminMiddleware, asy
 });
 
 
+// ========== COMMANDES MANUELLES (Datacenter, Residential, Static ISP) ==========
+
+const ManualOrderSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, required: true }, // datacenter | residential | residential_pro | static_isp
+  typeLabel: { type: String, required: true },
+  volume: { type: String, required: true }, // ex: "10 GB" ou "5 IPs"
+  totalPrice: { type: Number, required: true },
+  notes: { type: String, default: '' },
+  status: { type: String, enum: ['pending', 'processing', 'delivered', 'cancelled'], default: 'pending' },
+  deliveryNotes: { type: String, default: '' }, // notes admin lors de la livraison
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const ManualOrder = mongoose.model('ManualOrder', ManualOrderSchema);
+
+// Passer une commande manuelle (côté client)
+app.post('/api/manual-order', authMiddleware, async (req, res) => {
+  try {
+    const { type, typeLabel, volume, totalPrice, notes } = req.body;
+
+    if (!type || !typeLabel || !volume || !totalPrice) {
+      return res.status(400).json({ error: 'Données de commande incomplètes' });
+    }
+
+    if (totalPrice <= 0) {
+      return res.status(400).json({ error: 'Prix invalide' });
+    }
+
+    // Vérification solde
+    if (req.user.balance < totalPrice) {
+      return res.status(400).json({
+        error: `Solde insuffisant. Il vous faut $${totalPrice.toFixed(2)}, vous avez $${req.user.balance.toFixed(2)}.`,
+        required: totalPrice,
+        balance: req.user.balance
+      });
+    }
+
+    // Débiter le solde
+    const balanceBefore = req.user.balance;
+    req.user.balance = parseFloat((req.user.balance - totalPrice).toFixed(2));
+    await req.user.save();
+
+    // Créer la commande
+    const order = new ManualOrder({
+      userId: req.user._id,
+      type,
+      typeLabel,
+      volume,
+      totalPrice,
+      notes: notes || ''
+    });
+    await order.save();
+
+    // Enregistrer transaction
+    await new Transaction({
+      userId: req.user._id,
+      type: 'purchase',
+      amount: totalPrice,
+      description: `Commande ${typeLabel} - ${volume}`,
+      balanceBefore,
+      balanceAfter: req.user.balance,
+      proxyDetails: { orderId: order._id, type, volume }
+    }).save();
+
+    res.json({
+      success: true,
+      message: `Commande envoyée ! Notre équipe va vous livrer vos proxies ${typeLabel} sous peu.`,
+      orderId: order._id,
+      userBalance: req.user.balance
+    });
+
+  } catch (error) {
+    console.error('Erreur manual-order:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mes commandes manuelles (côté client)
+app.get('/api/my-manual-orders', authMiddleware, async (req, res) => {
+  try {
+    const orders = await ManualOrder.find({ userId: req.user._id }).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ========== ROUTES ADMIN - COMMANDES MANUELLES ==========
+
+// Lister toutes les commandes manuelles
+app.get('/api/admin/manual-orders', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const orders = await ManualOrder.find()
+      .populate('userId', 'email balance')
+      .sort({ createdAt: -1 });
+
+    const formatted = orders.map(o => ({
+      ...o._doc,
+      userEmail: o.userId?.email || 'N/A'
+    }));
+
+    res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Marquer comme "en cours"
+app.post('/api/admin/manual-orders/:id/processing', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    order.status = 'processing';
+    order.updatedAt = new Date();
+    await order.save();
+
+    res.json({ success: true, message: 'Commande marquée en traitement' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Livrer une commande (marquer delivered + ajouter notes)
+app.post('/api/admin/manual-orders/:id/deliver', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { deliveryNotes } = req.body;
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    if (order.status === 'delivered') {
+      return res.status(400).json({ error: 'Commande déjà livrée' });
+    }
+
+    order.status = 'delivered';
+    order.deliveryNotes = deliveryNotes || '';
+    order.updatedAt = new Date();
+    await order.save();
+
+    // Enregistrer un proxy manuel dans ProxyPurchase pour que le client le voit dans "Mes proxies"
+    if (deliveryNotes) {
+      await new ProxyPurchase({
+        userId: order.userId,
+        packageType: order.type,
+        price: order.totalPrice,
+        host: deliveryNotes, // les credentials/infos de connexion dans le champ host
+        port: 0,
+        username: '',
+        password: '',
+        protocol: 'http',
+        expiresAt: null
+      }).save();
+    }
+
+    res.json({ success: true, message: 'Commande livrée avec succès' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Annuler une commande + rembourser
+app.post('/api/admin/manual-orders/:id/cancel', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const order = await ManualOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+
+    if (['delivered', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Commande déjà traitée ou annulée' });
+    }
+
+    const user = await User.findById(order.userId);
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+
+    // Rembourser
+    const balanceBefore = user.balance;
+    user.balance = parseFloat((user.balance + order.totalPrice).toFixed(2));
+    await user.save();
+
+    order.status = 'cancelled';
+    order.updatedAt = new Date();
+    await order.save();
+
+    // Transaction remboursement
+    await new Transaction({
+      userId: user._id,
+      type: 'credit',
+      amount: order.totalPrice,
+      description: `Remboursement commande annulée - ${order.typeLabel} ${order.volume}`,
+      balanceBefore,
+      balanceAfter: user.balance
+    }).save();
+
+    res.json({ success: true, message: 'Commande annulée et remboursée', newBalance: user.balance });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+
 // Démarrage
 app.listen(PORT, async () => {
   console.log('\n╔════════════════════════════════════════╗');

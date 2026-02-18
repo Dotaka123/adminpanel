@@ -53,6 +53,20 @@
         .alert-success {background:#d4edda; color:#155724; border:1px solid #c3e6cb;}
         .alert-error {background:#f8d7da; color:#721c24; border:1px solid #f5c6cb;}
         .loading {text-align:center; padding:40px; color:#666;}
+        /* Manual orders */
+        .status-badge {padding:4px 10px; border-radius:12px; font-size:12px; font-weight:700; text-transform:uppercase;}
+        .status-pending {background:#fff3cd; color:#856404;}
+        .status-processing {background:#cce5ff; color:#004085;}
+        .status-delivered {background:#d4edda; color:#155724;}
+        .status-cancelled {background:#f8d7da; color:#721c24;}
+        .order-notes {font-size:12px; color:#888; margin-top:4px; font-style:italic; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+        .type-chip {display:inline-block; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:700;}
+        .type-datacenter {background:#e3f0ff; color:#1a56db;}
+        .type-residential {background:#ecfdf5; color:#047857;}
+        .type-residential_pro {background:#f3e8ff; color:#6d28d9;}
+        .type-static_isp {background:#e0f7fa; color:#00796b;}
+        .stat-card.pending .number {color:#f59e0b;}
+        .deliver-modal-content {background:white; padding:30px; border-radius:15px; width:90%; max-width:550px; box-shadow:0 20px 60px rgba(0,0,0,0.3);}
     </style>
 </head>
 <body>
@@ -88,6 +102,7 @@
                 <div class="stat-card"><h3>Total Utilisateurs</h3><div class="number" id="totalUsers">0</div></div>
                 <div class="stat-card"><h3>Total Proxies Vendus</h3><div class="number" id="totalProxies">0</div></div>
                 <div class="stat-card"><h3>Revenus Totaux</h3><div class="number" id="totalRevenue">$0</div></div>
+                <div class="stat-card pending"><h3>Commandes en attente</h3><div class="number" id="pendingOrders" style="color:#f59e0b;">0</div></div>
             </div>
 
             <div class="main-panel">
@@ -95,6 +110,7 @@
                     <button class="tab active" onclick="switchTab('users')">👥 Utilisateurs</button>
                     <button class="tab" onclick="switchTab('transactions')">💰 Transactions</button>
                     <button class="tab" onclick="switchTab('recharges')">💳 Recharges</button>
+                    <button class="tab" onclick="switchTab('manualOrders')">📦 Commandes Manuelles</button>
                 </div>
 
                 <!-- Users Tab -->
@@ -137,6 +153,33 @@
                     </table>
                 </div>
             </div>
+
+                <!-- Manual Orders Tab -->
+                <div id="manualOrdersTab" class="tab-content">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                        <h3 style="color:#333;font-size:18px;">📦 Commandes Manuelles</h3>
+                        <button class="btn btn-primary" onclick="loadManualOrders()" style="font-size:13px;">🔄 Rafraîchir</button>
+                    </div>
+                    <div class="loading" id="manualOrdersLoading">Chargement...</div>
+                    <div style="overflow-x:auto;">
+                    <table class="users-table" id="manualOrdersTable" style="display:none;">
+                        <thead>
+                            <tr>
+                                <th>Client</th>
+                                <th>Type</th>
+                                <th>Volume</th>
+                                <th>Prix</th>
+                                <th>Date</th>
+                                <th>Notes client</th>
+                                <th>Statut</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="manualOrdersTableBody"></tbody>
+                    </table>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -155,6 +198,24 @@
                     <button type="submit" class="btn btn-success">Ajouter</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Modal Livraison Commande Manuelle -->
+    <div id="deliverModal" class="modal">
+        <div class="deliver-modal-content">
+            <h2>📦 Livrer la commande</h2>
+            <p style="color:#666;font-size:14px;margin-bottom:20px;">Collez ici les credentials / informations de connexion à transmettre au client.</p>
+            <div id="deliverAlert"></div>
+            <input type="hidden" id="deliverOrderId">
+            <div class="form-group">
+                <label>Informations de livraison (Host:Port:User:Pass ou autre)</label>
+                <textarea id="deliveryNotes" rows="5" style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:8px;font-family:monospace;font-size:13px;" placeholder="ex: 1.2.3.4:8080:myuser:mypass&#10;ou&#10;host: proxy.example.com&#10;port: 8080&#10;user: john&#10;pass: secret123"></textarea>
+            </div>
+            <div class="modal-buttons">
+                <button type="button" class="btn btn-danger" onclick="closeDeliverModal()">Annuler</button>
+                <button type="button" class="btn btn-success" onclick="confirmDeliver()">✅ Marquer comme livré</button>
+            </div>
         </div>
     </div>
 
@@ -211,6 +272,111 @@
 
         // Init
         if(token){fetch('/api/auth/me',{headers:{'Authorization':`Bearer ${token}`}}).then(r=>r.json()).then(u=>{if(u.isAdmin){currentUser=u; showDashboard();}else{logout();}}).catch(()=>logout());}
+
+        // ── showDashboard override to also load manual orders
+        const _origShow = showDashboard;
+        async function showDashboard(){
+            document.getElementById('loginScreen').style.display='none';
+            document.getElementById('dashboard').style.display='block';
+            document.getElementById('adminEmail').textContent=currentUser.email;
+            await loadStats(); await loadUsers(); await loadRecharges(); await loadManualOrders();
+        }
+
+        // ── Manual Orders ──
+        async function loadManualOrders() {
+            try {
+                const res = await fetch('/api/admin/manual-orders', {headers:{'Authorization':`Bearer ${token}`}});
+                const orders = await res.json();
+                document.getElementById('manualOrdersLoading').style.display = 'none';
+                document.getElementById('manualOrdersTable').style.display = 'table';
+
+                const pendingCount = orders.filter(o => o.status === 'pending').length;
+                // Update stat card if exists
+                const statEl = document.getElementById('pendingOrders');
+                if (statEl) statEl.textContent = pendingCount;
+
+                const tbody = document.getElementById('manualOrdersTableBody');
+                if (!orders.length) {
+                    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#999;padding:30px;">Aucune commande manuelle</td></tr>';
+                    return;
+                }
+
+                const typeClass = {datacenter:'type-datacenter', residential:'type-residential', residential_pro:'type-residential_pro', static_isp:'type-static_isp'};
+
+                tbody.innerHTML = orders.map(o => {
+                    const statusClass = 'status-' + o.status;
+                    const statusLabel = {pending:'En attente', processing:'En cours', delivered:'Livré', cancelled:'Annulé'}[o.status] || o.status;
+                    const tc = typeClass[o.type] || '';
+                    const actions = o.status === 'pending'
+                        ? `<button class="btn btn-primary" onclick="markProcessing('${o._id}')" style="font-size:12px;padding:5px 10px;">⚙️ En cours</button>
+                           <button class="btn btn-success" onclick="openDeliverModal('${o._id}')" style="font-size:12px;padding:5px 10px;">📦 Livrer</button>
+                           <button class="btn btn-danger" onclick="cancelOrder('${o._id}')" style="font-size:12px;padding:5px 10px;">✖ Annuler</button>`
+                        : o.status === 'processing'
+                        ? `<button class="btn btn-success" onclick="openDeliverModal('${o._id}')" style="font-size:12px;padding:5px 10px;">📦 Livrer</button>
+                           <button class="btn btn-danger" onclick="cancelOrder('${o._id}')" style="font-size:12px;padding:5px 10px;">✖ Annuler</button>`
+                        : `<span style="color:#999;font-size:12px;">—</span>`;
+
+                    return `<tr>
+                        <td style="font-size:13px;">${o.userEmail}</td>
+                        <td><span class="type-chip ${tc}">${o.typeLabel}</span></td>
+                        <td style="font-weight:700;">${o.volume}</td>
+                        <td style="font-weight:700;color:#667eea;">$${o.totalPrice.toFixed(2)}</td>
+                        <td style="font-size:12px;color:#888;">${new Date(o.createdAt).toLocaleString('fr-FR')}</td>
+                        <td><div class="order-notes" title="${o.notes || ''}">${o.notes || '—'}</div></td>
+                        <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+                        <td>${actions}</td>
+                    </tr>`;
+                }).join('');
+            } catch(err) { console.error(err); }
+        }
+
+        async function markProcessing(id) {
+            try {
+                const res = await fetch('/api/admin/manual-orders/' + id + '/processing', {method:'POST', headers:{'Authorization':`Bearer ${token}`,'Content-Type':'application/json'}});
+                if (!res.ok) { const d = await res.json(); alert(d.error || 'Erreur'); return; }
+                await loadManualOrders();
+            } catch(err) { alert(err.message); }
+        }
+
+        function openDeliverModal(id) {
+            document.getElementById('deliverOrderId').value = id;
+            document.getElementById('deliveryNotes').value = '';
+            document.getElementById('deliverAlert').innerHTML = '';
+            document.getElementById('deliverModal').classList.add('active');
+        }
+
+        function closeDeliverModal() {
+            document.getElementById('deliverModal').classList.remove('active');
+        }
+
+        async function confirmDeliver() {
+            const id = document.getElementById('deliverOrderId').value;
+            const notes = document.getElementById('deliveryNotes').value.trim();
+            if (!notes) { document.getElementById('deliverAlert').innerHTML = '<div class="alert alert-error">Veuillez entrer les informations de livraison</div>'; return; }
+
+            try {
+                const res = await fetch('/api/admin/manual-orders/' + id + '/deliver', {
+                    method: 'POST',
+                    headers: {'Authorization':`Bearer ${token}`, 'Content-Type':'application/json'},
+                    body: JSON.stringify({ deliveryNotes: notes })
+                });
+                const data = await res.json();
+                if (!res.ok) { document.getElementById('deliverAlert').innerHTML = '<div class="alert alert-error">' + (data.error || 'Erreur') + '</div>'; return; }
+                document.getElementById('deliverAlert').innerHTML = '<div class="alert alert-success">✅ Livraison enregistrée !</div>';
+                setTimeout(() => { closeDeliverModal(); loadManualOrders(); }, 1200);
+            } catch(err) { document.getElementById('deliverAlert').innerHTML = '<div class="alert alert-error">Erreur: ' + err.message + '</div>'; }
+        }
+
+        async function cancelOrder(id) {
+            if (!confirm('Annuler cette commande et rembourser le client ?')) return;
+            try {
+                const res = await fetch('/api/admin/manual-orders/' + id + '/cancel', {method:'POST', headers:{'Authorization':`Bearer ${token}`,'Content-Type':'application/json'}});
+                const data = await res.json();
+                if (!res.ok) { alert(data.error || 'Erreur'); return; }
+                alert('✅ Commande annulée et client remboursé ($' + (data.newBalance || 0).toFixed(2) + ')');
+                await loadManualOrders(); await loadUsers();
+            } catch(err) { alert(err.message); }
+        }
     </script>
 </body>
 </html>

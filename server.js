@@ -157,6 +157,26 @@ const ProxyPurchase = mongoose.model('ProxyPurchase', ProxyPurchaseSchema);
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-change-this';
 
+// Simple in-memory rate limiter for proxy purchases (max 10/hour per user)
+const purchaseRateLimit = new Map();
+function checkPurchaseRateLimit(userId) {
+    const key = userId.toString();
+    const now = Date.now();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    if (!purchaseRateLimit.has(key)) {
+        purchaseRateLimit.set(key, { count: 1, start: now });
+        return true;
+    }
+    const entry = purchaseRateLimit.get(key);
+    if (now - entry.start > windowMs) {
+        purchaseRateLimit.set(key, { count: 1, start: now });
+        return true;
+    }
+    if (entry.count >= 10) return false;
+    entry.count++;
+    return true;
+}
+
 // Middleware d'authentification
 const authMiddleware = async (req, res, next) => {
   try {
@@ -742,18 +762,17 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
     }
 
     // ✅ VALIDATION 3 : Vérifier si les credentials existent déjà dans notre BDD
-    const existingProxy = await ProxyPurchase.findOne({
-      $or: [
-        { username: username },
-        { password: password },
-        { username: username, password: password }
-      ]
-    });
-
+    // Only check username uniqueness (password can be same for different usernames)
+    const existingProxy = await ProxyPurchase.findOne({ username: username });
     if (existingProxy) {
       return res.status(409).json({ 
-        error: 'Ces identifiants sont déjà utilisés. Veuillez en choisir d\'autres.' 
+        error: 'Ce username est déjà utilisé. Veuillez en choisir un autre.' 
       });
+    }
+
+    // Rate limit check
+    if (!checkPurchaseRateLimit(req.user._id)) {
+        return res.status(429).json({ error: 'Trop d'achats. Maximum 10 proxies par heure. Réessayez plus tard.' });
     }
 
     // Calcul du prix
@@ -1336,6 +1355,20 @@ app.post('/api/manual-order', authMiddleware, async (req, res) => {
       notes: notes || ''
     });
     await order.save();
+
+    // Notify admin by email
+    try {
+        const admins = await User.find({ isAdmin: true }).select('email');
+        for (const admin of admins) {
+            await sendEmailViaBrevo(
+                admin.email,
+                `📦 Nouvelle commande manuelle - ${typeLabel}`,
+                `<html><body style="font-family:Arial,sans-serif;padding:20px;background:#f4f4f4"><div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:30px"><h2 style="color:#6366f1">📦 Nouvelle commande manuelle</h2><table style="width:100%;border-collapse:collapse"><tr><td style="padding:8px;color:#666">Type</td><td style="padding:8px;font-weight:bold">${typeLabel}</td></tr><tr style="background:#f9f9f9"><td style="padding:8px;color:#666">Volume</td><td style="padding:8px;font-weight:bold">${volume}</td></tr><tr><td style="padding:8px;color:#666">Montant</td><td style="padding:8px;font-weight:bold;color:#6366f1">$${totalPrice}</td></tr><tr style="background:#f9f9f9"><td style="padding:8px;color:#666">Client</td><td style="padding:8px">${req.user.email}</td></tr><tr><td style="padding:8px;color:#666">Notes</td><td style="padding:8px">${notes || '—'}</td></tr></table><div style="margin-top:20px;text-align:center"><a href="${process.env.FRONTEND_URL}/admin.html" style="background:#6366f1;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Gérer les commandes</a></div></div></body></html>`
+            );
+        }
+    } catch(emailErr) {
+        console.error('Email admin notification error:', emailErr.message);
+    }
 
     // Enregistrer transaction
     await new Transaction({

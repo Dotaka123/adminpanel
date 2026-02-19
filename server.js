@@ -772,7 +772,7 @@ app.post('/api/create-proxy', authMiddleware, async (req, res) => {
 
     // Rate limit check
     if (!checkPurchaseRateLimit(req.user._id)) {
-        return res.status(429).json({ error: 'Trop d'achats. Maximum 10 proxies par heure. Réessayez plus tard.' });
+        return res.status(429).json({ error: "Trop d'achats. Maximum 10 proxies par heure. Réessayez plus tard." });
     }
 
     // Calcul du prix

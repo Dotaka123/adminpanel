@@ -1517,6 +1517,190 @@ app.post('/api/admin/manual-orders/:id/cancel', authMiddleware, adminMiddleware,
 
 
 // Démarrage
+// ========== CRYPTO PAY (CryptoBot) INTEGRATION ==========
+const CRYPTO_PAY_TOKEN = process.env.CRYPTO_PAY_TOKEN; // Votre token CryptoBot
+const CRYPTO_PAY_API = 'https://pay.crypt.bot/api'; // Mainnet (utiliser https://testnet-pay.crypt.bot/api pour le testnet)
+
+// Helper: appel API Crypto Pay
+async function cryptoPayRequest(method, params = {}, httpMethod = 'GET') {
+  const url = `${CRYPTO_PAY_API}/${method}`;
+  const config = {
+    headers: { 'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN },
+    timeout: 10000
+  };
+  const resp = httpMethod === 'POST'
+    ? await axios.post(url, params, config)
+    : await axios.get(url, { ...config, params });
+  if (!resp.data.ok) throw new Error(resp.data.error || 'Crypto Pay API error');
+  return resp.data.result;
+}
+
+// Route: créer une invoice Crypto Pay
+app.post('/api/crypto-pay/create-invoice', authMiddleware, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || amount < 0.5) {
+      return res.status(400).json({ error: 'Montant minimum : 0.50$' });
+    }
+
+    const invoice = await cryptoPayRequest('createInvoice', {
+      currency_type: 'fiat',
+      fiat: 'USD',
+      amount: String(amount),
+      accepted_assets: 'USDT,TON,BTC,ETH,LTC,BNB,TRX,USDC',
+      description: `Recharge ProxyFlow - ${req.user.email}`,
+      payload: JSON.stringify({ userId: req.user._id.toString(), amount }),
+      paid_btn_name: 'openBot',
+      paid_btn_url: process.env.FRONTEND_URL + '/dashboard.html',
+      expires_in: 3600 // 1 heure
+    }, 'POST');
+
+    // Enregistrer la demande en "pending" avec l'invoice_id
+    const recharge = new Recharge({
+      userId: req.user._id,
+      amount,
+      faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`
+    });
+    await recharge.save();
+
+    res.json({
+      success: true,
+      invoice_id: invoice.invoice_id,
+      bot_invoice_url: invoice.bot_invoice_url,
+      mini_app_invoice_url: invoice.mini_app_invoice_url,
+      web_app_invoice_url: invoice.web_app_invoice_url,
+      recharge_id: recharge._id
+    });
+
+  } catch (error) {
+    console.error('Erreur create-invoice Crypto Pay:', error.message);
+    res.status(500).json({ error: 'Impossible de créer l\'invoice: ' + error.message });
+  }
+});
+
+// Route: vérifier le statut d'une invoice (polling)
+app.get('/api/crypto-pay/invoice-status/:invoiceId', authMiddleware, async (req, res) => {
+  try {
+    const result = await cryptoPayRequest('getInvoices', {
+      invoice_ids: req.params.invoiceId
+    });
+    const invoice = result.items?.[0];
+    if (!invoice) return res.status(404).json({ error: 'Invoice non trouvée' });
+
+    // Si payée et pas encore créditée, créditer automatiquement
+    if (invoice.status === 'paid') {
+      let payload;
+      try { payload = JSON.parse(invoice.payload); } catch(e) { payload = null; }
+
+      if (payload && payload.userId) {
+        // Vérifier qu'on n'a pas déjà crédité
+        const existing = await Recharge.findOne({
+          faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
+          status: 'approved'
+        });
+
+        if (!existing) {
+          const recharge = await Recharge.findOne({
+            faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
+            status: 'pending'
+          });
+
+          if (recharge) {
+            const user = await User.findById(payload.userId);
+            if (user) {
+              const balanceBefore = user.balance;
+              user.balance += recharge.amount;
+              await user.save();
+
+              recharge.status = 'approved';
+              await recharge.save();
+
+              await new Transaction({
+                userId: user._id,
+                type: 'credit',
+                amount: recharge.amount,
+                description: `Recharge Crypto Pay - Invoice #${invoice.invoice_id} (${invoice.paid_asset || 'crypto'})`,
+                balanceBefore,
+                balanceAfter: user.balance
+              }).save();
+
+              console.log(`✅ Crypto Pay: ${recharge.amount}$ crédité à ${user.email}`);
+            }
+          }
+        }
+      }
+    }
+
+    res.json({ status: invoice.status, invoice_id: invoice.invoice_id });
+  } catch (error) {
+    console.error('Erreur invoice-status:', error.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Route: Webhook Crypto Pay (confirmation automatique en temps réel)
+app.post('/api/crypto-pay/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const { createHash, createHmac } = require('crypto');
+    const signature = req.headers['crypto-pay-api-signature'];
+    const body = req.body;
+
+    // Vérifier la signature
+    const secret = createHash('sha256').update(CRYPTO_PAY_TOKEN).digest();
+    const checkString = body.toString();
+    const hmac = createHmac('sha256', secret).update(checkString).digest('hex');
+
+    if (hmac !== signature) {
+      console.warn('⚠️  Webhook Crypto Pay: signature invalide');
+      return res.status(401).json({ error: 'Signature invalide' });
+    }
+
+    const update = JSON.parse(checkString);
+
+    if (update.update_type === 'invoice_paid') {
+      const invoice = update.payload;
+      let payload;
+      try { payload = JSON.parse(invoice.payload); } catch(e) { payload = null; }
+
+      if (payload && payload.userId) {
+        const recharge = await Recharge.findOne({
+          faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
+          status: 'pending'
+        });
+
+        if (recharge) {
+          const user = await User.findById(payload.userId);
+          if (user) {
+            const balanceBefore = user.balance;
+            user.balance += recharge.amount;
+            await user.save();
+
+            recharge.status = 'approved';
+            await recharge.save();
+
+            await new Transaction({
+              userId: user._id,
+              type: 'credit',
+              amount: recharge.amount,
+              description: `Recharge Crypto Pay - Invoice #${invoice.invoice_id} (${invoice.paid_asset || 'crypto'})`,
+              balanceBefore,
+              balanceAfter: user.balance
+            }).save();
+
+            console.log(`✅ Webhook Crypto Pay: ${recharge.amount}$ crédité à ${user.email}`);
+          }
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Erreur webhook Crypto Pay:', error.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+// ========== FIN CRYPTO PAY ==========
+
 app.listen(PORT, async () => {
   console.log('\n╔════════════════════════════════════════╗');
   console.log('║    PROXY SHOP API - SERVEUR ACTIF      ║');

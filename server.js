@@ -1516,191 +1516,226 @@ app.post('/api/admin/manual-orders/:id/cancel', authMiddleware, adminMiddleware,
 });
 
 
-// Démarrage
-// ========== CRYPTO PAY (CryptoBot) INTEGRATION ==========
-const CRYPTO_PAY_TOKEN = process.env.CRYPTO_PAY_TOKEN; // Votre token CryptoBot
-const CRYPTO_PAY_API = 'https://pay.crypt.bot/api'; // Mainnet (utiliser https://testnet-pay.crypt.bot/api pour le testnet)
 
-// Helper: appel API Crypto Pay
-async function cryptoPayRequest(method, params = {}, httpMethod = 'GET') {
-  const url = `${CRYPTO_PAY_API}/${method}`;
-  const config = {
-    headers: { 'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN },
-    timeout: 10000
-  };
-  const resp = httpMethod === 'POST'
-    ? await axios.post(url, params, config)
-    : await axios.get(url, { ...config, params });
-  if (!resp.data.ok) throw new Error(resp.data.error || 'Crypto Pay API error');
-  return resp.data.result;
-}
+// ========== CRYPTAPI PAYMENT INTEGRATION ==========
+// Pas besoin de clé API - CryptAPI est gratuit et sans inscription
+// Frais: 1% prélevé automatiquement sur chaque transaction
+// Doc: https://docs.cryptapi.io
 
-// Route: créer une invoice Crypto Pay
-app.post('/api/crypto-pay/create-invoice', authMiddleware, async (req, res) => {
+const CRYPTAPI_BACKEND_URL = process.env.BACKEND_URL || 'https://adminpanel-fj5l.onrender.com';
+
+// Coins supportés avec leur ticker CryptAPI et label
+const SUPPORTED_COINS = {
+  'btc':       { label: 'Bitcoin (BTC)',      icon: '₿' },
+  'eth':       { label: 'Ethereum (ETH)',     icon: 'Ξ' },
+  'erc20_usdt':{ label: 'USDT (ERC-20)',      icon: '₮' },
+  'trc20_usdt':{ label: 'USDT (TRC-20)',      icon: '₮' },
+  'ltc':       { label: 'Litecoin (LTC)',     icon: 'Ł' },
+  'bnb':       { label: 'BNB (BSC)',          icon: 'B' },
+  'bep20_usdt':{ label: 'USDT (BEP-20)',      icon: '₮' },
+  'sol':       { label: 'Solana (SOL)',        icon: '◎' },
+  'matic':     { label: 'Polygon (MATIC)',     icon: '⬡' },
+};
+
+// Modèle pour les paiements CryptAPI
+const CryptAPIPaymentSchema = new mongoose.Schema({
+  userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  amount:       { type: Number, required: true },        // montant en USD
+  coin:         { type: String, required: true },        // ex: 'btc', 'erc20_usdt'
+  addressIn:    { type: String, required: true },        // adresse générée par CryptAPI (user paie ici)
+  addressOut:   { type: String, required: true },        // votre propre adresse crypto
+  status:       { type: String, enum: ['pending', 'paid', 'expired'], default: 'pending' },
+  txidIn:       { type: String, default: '' },           // txid de la transaction reçue
+  valueCoin:    { type: Number, default: 0 },            // montant reçu en crypto
+  createdAt:    { type: Date, default: Date.now },
+  expiresAt:    { type: Date, default: () => new Date(Date.now() + 60 * 60 * 1000) } // 1h
+});
+
+const CryptAPIPayment = mongoose.model('CryptAPIPayment', CryptAPIPaymentSchema);
+
+// Route: récupérer les coins supportés + adresses configurées
+app.get('/api/cryptapi/coins', (req, res) => {
+  const coins = Object.entries(SUPPORTED_COINS).map(([ticker, info]) => ({
+    ticker,
+    ...info,
+    address: process.env[`CRYPTAPI_ADDR_${ticker.toUpperCase().replace('-','_')}`] || null
+  })).filter(c => c.address); // n'afficher que les coins configurés
+  res.json(coins);
+});
+
+// Route: créer un paiement CryptAPI (générer une adresse de paiement unique)
+app.post('/api/cryptapi/create', authMiddleware, async (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, coin } = req.body;
+
     if (!amount || amount < 0.5) {
-      return res.status(400).json({ error: 'Montant minimum : 0.50$' });
+      return res.status(400).json({ error: 'Montant minimum : $0.50' });
     }
 
-    const invoice = await cryptoPayRequest('createInvoice', {
-      currency_type: 'fiat',
-      fiat: 'USD',
-      amount: String(amount),
-      accepted_assets: 'USDT,TON,BTC,ETH,LTC,BNB,TRX,USDC',
-      description: `Recharge ProxyFlow - ${req.user.email}`,
-      payload: JSON.stringify({ userId: req.user._id.toString(), amount }),
-      paid_btn_name: 'openBot',
-      paid_btn_url: process.env.FRONTEND_URL + '/dashboard.html',
-      expires_in: 3600 // 1 heure
-    }, 'POST');
+    const coinInfo = SUPPORTED_COINS[coin];
+    if (!coinInfo) {
+      return res.status(400).json({ error: 'Coin non supporté' });
+    }
 
-    // Enregistrer la demande en "pending" avec l'invoice_id
+    // Récupérer votre adresse pour ce coin depuis les variables d'environnement
+    const envKey = `CRYPTAPI_ADDR_${coin.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+    const myAddress = process.env[envKey];
+    if (!myAddress) {
+      return res.status(400).json({ error: `Adresse ${coin} non configurée sur le serveur` });
+    }
+
+    // Construire le callback URL avec les infos nécessaires
+    const callbackUrl = `${CRYPTAPI_BACKEND_URL}/api/cryptapi/callback?userId=${req.user._id}&amount=${amount}&coin=${coin}`;
+
+    // Appel CryptAPI pour générer l'adresse unique
+    const apiUrl = `https://api.cryptapi.io/${coin}/create/`;
+    const params = new URLSearchParams({
+      callback: callbackUrl,
+      address: myAddress,
+      pending: '0',       // 0 = notifier seulement sur confirmation, 1 = aussi sur pending
+      confirmations: '1', // nombre de confirmations requises
+      email: '',
+      post: '0',
+      json: '0',
+      priority: 'default'
+    });
+
+    const response = await axios.get(`${apiUrl}?${params.toString()}`);
+    
+    if (response.data.status !== 'success') {
+      throw new Error(response.data.error || 'Erreur CryptAPI');
+    }
+
+    const addressIn = response.data.address_in;
+
+    // Sauvegarder le paiement en BDD
+    const payment = new CryptAPIPayment({
+      userId: req.user._id,
+      amount,
+      coin,
+      addressIn,
+      addressOut: myAddress,
+    });
+    await payment.save();
+
+    // Aussi sauvegarder dans Recharge pour l'historique unifié
     const recharge = new Recharge({
       userId: req.user._id,
       amount,
-      faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`
+      faucetpayUsername: `CryptAPI | ${coinInfo.label} | ${addressIn.slice(0, 12)}...`
     });
     await recharge.save();
 
     res.json({
       success: true,
-      invoice_id: invoice.invoice_id,
-      bot_invoice_url: invoice.bot_invoice_url,
-      mini_app_invoice_url: invoice.mini_app_invoice_url,
-      web_app_invoice_url: invoice.web_app_invoice_url,
-      recharge_id: recharge._id
+      payment_id: payment._id,
+      recharge_id: recharge._id,
+      address: addressIn,
+      coin,
+      coin_label: coinInfo.label,
+      amount_usd: amount,
+      expires_at: payment.expiresAt
     });
 
   } catch (error) {
-    console.error('Erreur create-invoice Crypto Pay:', error.message);
-    res.status(500).json({ error: 'Impossible de créer l\'invoice: ' + error.message });
+    console.error('Erreur CryptAPI create:', error.message);
+    res.status(500).json({ error: 'Erreur lors de la création du paiement: ' + error.message });
   }
 });
 
-// Route: vérifier le statut d'une invoice (polling)
-app.get('/api/crypto-pay/invoice-status/:invoiceId', authMiddleware, async (req, res) => {
+// Route: statut d'un paiement
+app.get('/api/cryptapi/status/:paymentId', authMiddleware, async (req, res) => {
   try {
-    const result = await cryptoPayRequest('getInvoices', {
-      invoice_ids: req.params.invoiceId
+    const payment = await CryptAPIPayment.findOne({
+      _id: req.params.paymentId,
+      userId: req.user._id
     });
-    const invoice = result.items?.[0];
-    if (!invoice) return res.status(404).json({ error: 'Invoice non trouvée' });
-
-    // Si payée et pas encore créditée, créditer automatiquement
-    if (invoice.status === 'paid') {
-      let payload;
-      try { payload = JSON.parse(invoice.payload); } catch(e) { payload = null; }
-
-      if (payload && payload.userId) {
-        // Vérifier qu'on n'a pas déjà crédité
-        const existing = await Recharge.findOne({
-          faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
-          status: 'approved'
-        });
-
-        if (!existing) {
-          const recharge = await Recharge.findOne({
-            faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
-            status: 'pending'
-          });
-
-          if (recharge) {
-            const user = await User.findById(payload.userId);
-            if (user) {
-              const balanceBefore = user.balance;
-              user.balance += recharge.amount;
-              await user.save();
-
-              recharge.status = 'approved';
-              await recharge.save();
-
-              await new Transaction({
-                userId: user._id,
-                type: 'credit',
-                amount: recharge.amount,
-                description: `Recharge Crypto Pay - Invoice #${invoice.invoice_id} (${invoice.paid_asset || 'crypto'})`,
-                balanceBefore,
-                balanceAfter: user.balance
-              }).save();
-
-              console.log(`✅ Crypto Pay: ${recharge.amount}$ crédité à ${user.email}`);
-            }
-          }
-        }
-      }
-    }
-
-    res.json({ status: invoice.status, invoice_id: invoice.invoice_id });
+    if (!payment) return res.status(404).json({ error: 'Paiement non trouvé' });
+    res.json({ status: payment.status, txid: payment.txidIn });
   } catch (error) {
-    console.error('Erreur invoice-status:', error.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
-// Route: Webhook Crypto Pay (confirmation automatique en temps réel)
-app.post('/api/crypto-pay/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+// Route: callback CryptAPI (appelé par CryptAPI après paiement confirmé)
+// ⚠️ Cette route est publique (pas de authMiddleware) - sécurisée par vérification interne
+app.get('/api/cryptapi/callback', async (req, res) => {
   try {
-    const { createHash, createHmac } = require('crypto');
-    const signature = req.headers['crypto-pay-api-signature'];
-    const body = req.body;
+    const { userId, amount, coin, address_in, txid_in, value_coin, value_forwarded_coin, pending } = req.query;
 
-    // Vérifier la signature
-    const secret = createHash('sha256').update(CRYPTO_PAY_TOKEN).digest();
-    const checkString = body.toString();
-    const hmac = createHmac('sha256', secret).update(checkString).digest('hex');
+    console.log(`💰 CryptAPI Callback reçu: ${coin} | user:${userId} | txid:${txid_in} | pending:${pending}`);
 
-    if (hmac !== signature) {
-      console.warn('⚠️  Webhook Crypto Pay: signature invalide');
-      return res.status(401).json({ error: 'Signature invalide' });
+    // Ignorer les transactions en attente (pending=1)
+    if (pending === '1') {
+      console.log('   → Transaction en attente, ignorée');
+      return res.send('*ok*');
     }
 
-    const update = JSON.parse(checkString);
-
-    if (update.update_type === 'invoice_paid') {
-      const invoice = update.payload;
-      let payload;
-      try { payload = JSON.parse(invoice.payload); } catch(e) { payload = null; }
-
-      if (payload && payload.userId) {
-        const recharge = await Recharge.findOne({
-          faucetpayUsername: `CryptoPay | Invoice #${invoice.invoice_id}`,
-          status: 'pending'
-        });
-
-        if (recharge) {
-          const user = await User.findById(payload.userId);
-          if (user) {
-            const balanceBefore = user.balance;
-            user.balance += recharge.amount;
-            await user.save();
-
-            recharge.status = 'approved';
-            await recharge.save();
-
-            await new Transaction({
-              userId: user._id,
-              type: 'credit',
-              amount: recharge.amount,
-              description: `Recharge Crypto Pay - Invoice #${invoice.invoice_id} (${invoice.paid_asset || 'crypto'})`,
-              balanceBefore,
-              balanceAfter: user.balance
-            }).save();
-
-            console.log(`✅ Webhook Crypto Pay: ${recharge.amount}$ crédité à ${user.email}`);
-          }
-        }
-      }
+    if (!userId || !amount || !address_in) {
+      console.warn('⚠️  Callback CryptAPI: paramètres manquants');
+      return res.send('*ok*');
     }
 
-    res.json({ ok: true });
+    // Vérifier que le paiement existe et est encore pending
+    const payment = await CryptAPIPayment.findOne({
+      userId,
+      addressIn: address_in,
+      status: 'pending'
+    });
+
+    if (!payment) {
+      console.log('   → Paiement déjà traité ou non trouvé');
+      return res.send('*ok*'); // Répondre *ok* pour éviter les retries
+    }
+
+    // Mettre à jour le paiement
+    payment.status = 'paid';
+    payment.txidIn = txid_in || '';
+    payment.valueCoin = parseFloat(value_coin) || 0;
+    await payment.save();
+
+    // Créditer l'utilisateur
+    const user = await User.findById(userId);
+    if (!user) {
+      console.error('   → Utilisateur non trouvé:', userId);
+      return res.send('*ok*');
+    }
+
+    const amountNum = parseFloat(amount);
+    const balanceBefore = user.balance;
+    user.balance += amountNum;
+    await user.save();
+
+    // Mettre à jour la Recharge associée
+    await Recharge.findOneAndUpdate(
+      { userId, faucetpayUsername: { $regex: `CryptAPI.*${address_in.slice(0, 12)}` } },
+      { status: 'approved' }
+    );
+
+    // Enregistrer la transaction
+    await new Transaction({
+      userId: user._id,
+      type: 'credit',
+      amount: amountNum,
+      description: `Recharge Crypto (${coin.toUpperCase()}) via CryptAPI - txid: ${(txid_in || '').slice(0, 20)}...`,
+      balanceBefore,
+      balanceAfter: user.balance
+    }).save();
+
+    console.log(`✅ CryptAPI: $${amountNum} crédité à ${user.email} (balance: $${user.balance})`);
+
+    // CryptAPI attend *ok* comme réponse pour arrêter les retries
+    res.send('*ok*');
+
   } catch (error) {
-    console.error('Erreur webhook Crypto Pay:', error.message);
-    res.status(500).json({ error: 'Erreur serveur' });
+    console.error('Erreur callback CryptAPI:', error.message);
+    // Toujours répondre *ok* pour éviter les retries infinis
+    res.send('*ok*');
   }
 });
-// ========== FIN CRYPTO PAY ==========
+// ========== FIN CRYPTAPI ==========
 
+// Démarrage
 app.listen(PORT, async () => {
   console.log('\n╔════════════════════════════════════════╗');
   console.log('║    PROXY SHOP API - SERVEUR ACTIF      ║');

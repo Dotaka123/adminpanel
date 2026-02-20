@@ -121,6 +121,8 @@ const UserSchema = new mongoose.Schema({
   passwordResetExpires: { type: Date, default: null },
   emailSentCount: { type: Number, default: 0 },
   emailSentWindowStart: { type: Date, default: null },
+  notifyEnabled: { type: Boolean, default: false },  // balance change email notifications
+  notifyEmail: { type: String, default: null },       // override email for notifications
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -1265,6 +1267,9 @@ app.post('/api/admin/recharges/:id/approve', authMiddleware, adminMiddleware, as
     recharge.status = 'approved';
     await recharge.save();
 
+    // Send email notification if user opted in
+    await sendBalanceNotification(user, recharge.amount, user.balance, recharge.faucetpayUsername || 'Mvola');
+
     // Enregistrer la transaction
     await new Transaction({
       userId: user._id,
@@ -1724,6 +1729,9 @@ app.get('/api/cryptapi/callback', async (req, res) => {
 
     console.log(`✅ CryptAPI: $${amountNum} crédité à ${user.email} (balance: $${user.balance})`);
 
+    // Send email notification if user opted in
+    await sendBalanceNotification(user, amountNum, user.balance, coin ? coin.toUpperCase() + ' via CryptAPI' : 'Crypto');
+
     // CryptAPI attend *ok* comme réponse pour arrêter les retries
     res.send('*ok*');
 
@@ -1733,6 +1741,66 @@ app.get('/api/cryptapi/callback', async (req, res) => {
     res.send('*ok*');
   }
 });
+
+// ── Route: Save / update notification preference ──
+app.post('/api/notify-preference', authMiddleware, async (req, res) => {
+  try {
+    const { enabled, email } = req.body;
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.notifyEnabled = !!enabled;
+    user.notifyEmail = email || null;
+    await user.save();
+    res.json({ success: true, notifyEnabled: user.notifyEnabled });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Helper: send balance notification email when balance is credited ──
+async function sendBalanceNotification(user, amountCredited, newBalance, method) {
+  if (!user.notifyEnabled) return;
+  const toEmail = user.notifyEmail || user.email;
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:30px;">
+  <div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+    <div style="text-align:center;margin-bottom:24px;"><h1 style="color:#6366f1;font-size:26px;margin:0;">🌐 ProxyFlow</h1></div>
+    <h2 style="color:#1f2937;margin-bottom:8px;">💰 Votre solde a été crédité</h2>
+    <p style="color:#6b7280;line-height:1.6;">Un paiement a été confirmé sur votre compte ProxyFlow :</p>
+    <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px;margin:20px 0;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:#16a34a;">+$${Number(amountCredited).toFixed(2)}</div>
+      <div style="color:#6b7280;font-size:14px;margin-top:4px;">via ${method || 'Crypto'}</div>
+    </div>
+    <div style="background:#f8fafc;border-radius:8px;padding:14px;margin-bottom:20px;">
+      <span style="color:#6b7280;">Nouveau solde : </span><strong style="color:#1f2937;">$${Number(newBalance).toFixed(2)}</strong>
+    </div>
+    <p style="color:#9ca3af;font-size:12px;text-align:center;">Vous recevez cet email car les notifications sont activées sur votre compte ProxyFlow.</p>
+  </div>
+</body></html>`;
+  try {
+    await sendEmail(toEmail, '✅ Solde crédité - ProxyFlow', html);
+    console.log('📧 Balance notification sent to', toEmail);
+  } catch (err) {
+    console.error('Notify email error:', err.message);
+  }
+}
+
+// ── Cron: auto-expire pending CryptAPI payments after 1h ──
+setInterval(async () => {
+  try {
+    const expired = await CryptAPIPayment.find({ status: 'pending', expiresAt: { $lt: new Date() } });
+    for (const p of expired) {
+      p.status = 'expired';
+      await p.save();
+      await Recharge.findOneAndUpdate(
+        { userId: p.userId, status: 'pending', faucetpayUsername: { $regex: 'CryptAPI' }, createdAt: { $gte: new Date(p.createdAt.getTime() - 10000) } },
+        { status: 'rejected' }
+      );
+    }
+    if (expired.length) console.log('⏰ Auto-expired', expired.length, 'CryptAPI payment(s)');
+  } catch (e) { console.error('Expiry cron error:', e.message); }
+}, 60 * 1000);
+
 // ========== FIN CRYPTAPI ==========
 
 // Démarrage

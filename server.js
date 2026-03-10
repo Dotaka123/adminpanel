@@ -299,7 +299,7 @@ async function apiRequest(method, endpoint, data = null, params = null) {
 // ========== INTÉGRATION VPROXY.CC ==========
 // Livraison instantanée : residential, datacenter, residential_premium
 // ISP et Mobile restent en commandes manuelles
-const mountVproxy = require('./vproxy-routes');
+const mountVproxy = require('./routes/vproxy-routes');
 mountVproxy(app, User, authMiddleware);
 
 // ========== ROUTES AUTHENTIFICATION ==========

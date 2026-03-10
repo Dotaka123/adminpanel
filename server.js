@@ -123,7 +123,11 @@ const UserSchema = new mongoose.Schema({
   emailSentWindowStart: { type: Date, default: null },
   notifyEnabled: { type: Boolean, default: false },  // balance change email notifications
   notifyEmail: { type: String, default: null },       // override email for notifications
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  // ── vproxy.cc subuser IDs (un par pool) ─────────────────────────────────────
+  vproxySubuserId_residential:         { type: Number, default: null },
+  vproxySubuserId_datacenter:          { type: Number, default: null },
+  vproxySubuserId_residential_premium: { type: Number, default: null }
 });
 
 const TransactionSchema = new mongoose.Schema({
@@ -291,6 +295,12 @@ async function apiRequest(method, endpoint, data = null, params = null) {
     throw error;
   }
 }
+
+// ========== INTÉGRATION VPROXY.CC ==========
+// Livraison instantanée : residential, datacenter, residential_premium
+// ISP et Mobile restent en commandes manuelles
+const mountVproxy = require('./vproxy-routes');
+mountVproxy(app, User, authMiddleware);
 
 // ========== ROUTES AUTHENTIFICATION ==========
 
